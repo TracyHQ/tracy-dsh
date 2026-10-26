@@ -104,9 +104,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [],
       },
       {
-        signature: 'openRightbar(track: boolean, fullscreen: boolean): void',
+        signature: 'openRightbar(track: boolean, fullscreen: boolean, preferred?: number | undefined, max?: number): void',
         description: 'Report the right panel\'s presentation without changing its expanded state.',
-        parameters: [{ name: 'track', description: 'whether the normal panel width reserves a grid track, including beneath a fullscreen overlay.' }, { name: 'fullscreen', description: 'whether the panel covers the frame and hides its outer resize handle; independent of the underlying grid track.' }],
+        parameters: [{ name: 'track', description: 'whether the normal panel width reserves a grid track, including beneath a fullscreen overlay.' }, { name: 'fullscreen', description: 'whether the panel covers the frame and hides its outer resize handle; independent of the underlying grid track.' }, { name: 'preferred', description: 'the width in px the panel\'s active tab prefers; omit for the frame default. It sets the panel width only until the user drags the divider.' }, { name: 'max', description: 'Tracy: the widest in px the panel may be while its active tab\'s type names a ceiling; omit for none. It never replaces the width the user dragged to, so the panel returns to that width once the ceiling is gone.' }],
       },
       {
         signature: 'closeRightbar(): void',
@@ -118,7 +118,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
     key: 'locale',
     summary: 'Dictionary registry plus locale preference.',
-    description: 'Dictionary registry plus locale preference. Lookup walks the active language\'s declared fallback chain in the entry namespace, then repeats it in the shared common namespace before showing the key itself. Reads go through getLocale; preferences change only through setLocale, while language packs extend the catalog through addLanguage. Continuous sync uses the `locale/change` event or the LocaleFace getSnapshot/subscribe pair installed through `ctx.slots.installLocale`.',
+    description: 'Dictionary registry plus locale preference. Lookup walks the active language\'s declared fallback chain in the entry namespace, then repeats it in the shared common namespace before showing the key itself. Reads go through getLocale; preferences change only through setLocale and clearPreference, while language packs extend the catalog through addLanguage. Continuous sync uses the `locale/change` event or the LocaleFace getSnapshot/subscribe pair installed through `ctx.slots.installLocale`.',
     methods: [
       {
         signature: 'getLocale(): LocaleSnapshot',
@@ -140,8 +140,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'setLocale(id: string): void',
-        description: 'Switch the active locale — the only user preference write entry.\n\nThe durable write happens even when the id already matches the active locale, because the active value may be a provisional browser-derived or fallback resolution that nothing has stored yet. Picking the language already on screen is still an explicit choice, and it must survive a different browser sharing the same DSH home. Only the render notification is conditional: republishing an unchanged locale would churn every subscriber for nothing.',
+        description: 'Switch the active locale — the user preference write entry (clearPreference is the clear).\n\nThe durable write happens even when the id already matches the active locale, because the active value may be a provisional browser-derived or fallback resolution that nothing has stored yet. Picking the language already on screen is still an explicit choice, and it must survive a different browser sharing the same DSH home. Only the render notification is conditional: republishing an unchanged locale would churn every subscriber for nothing.',
         parameters: [{ name: 'id', description: 'a registered locale id; unknown ids throw.' }],
+      },
+      {
+        signature: 'clearPreference(): void',
+        description: 'Drop the explicit selection, so the active locale follows the browser\'s ordered language list again (the "follow device" choice; the language counterpart of Appearance\'s "System"). Loopback pages unset `locale.preference` in the Host document, memory-mode pages remove the browser\'s stored choice, and the browser-derived locale is published at once. Clearing when nothing is chosen still writes, for the same reason setLocale does: another browser sharing the home may hold one.',
+        parameters: [],
       },
       {
         signature: 'addLanguage(input: LanguageRegistration): () => void',
@@ -693,7 +698,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LocaleSnapshot',
-    declaration: 'export interface LocaleSnapshot {\n    active: LocaleId;\n    locales: readonly LocaleDefinition[];\n    revision: number;\n}',
+    declaration: 'export interface LocaleSnapshot {\n    active: LocaleId;\n    preference?: LocaleId;\n    locales: readonly LocaleDefinition[];\n    revision: number;\n}',
   },
   {
     name: 'MainPanelId',

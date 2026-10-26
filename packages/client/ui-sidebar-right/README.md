@@ -45,7 +45,7 @@ Normal and fullscreen presentations share the same content tree, so switching do
 
 In Windows Electron, `html[data-windows-titlebar]` keeps fullscreen panels below the caption and to the right of the expanded sidebar. The frame's `--dsh-windows-sidebar-width` supplies that inset and maximum width; `--dsh-windows-content-radius` supplies the top-left radius. Only fullscreen panels clip overflow for that corner.
 
-The seat reports presentation through `ctx.layout.openRightbar(track, fullscreen)` / `closeRightbar()`; the frame does not inject this package. Switching fullscreen on a wide viewport leaves the center width unchanged, and the width handle appears only in expanded normal mode. Independent floating panels and `float`/`dock` operations remain available.
+The seat reports presentation through `ctx.layout.openRightbar(track, fullscreen, preferred?, max?)` / `closeRightbar()`, where `preferred` is the active tab type's `preferredWidth` and `max` its `maxWidth` (Tracy); the frame does not inject this package. Tracy: while the active tab type names `maxWidth` on a viewport of 768px or more, the fullscreen switch is absent, the fullscreen command does nothing, and a recorded fullscreen mode is drawn as a normal panel and presented again on a tab without one. Switching fullscreen on a wide viewport leaves the center width unchanged, and the width handle appears only in expanded normal mode. Independent floating panels and `float`/`dock` operations remain available.
 
 The panel has no header row. Its two controls — the presentation switch and the collapse button — ride the kit's chrome seat at the far end of the top-right pane's tab strip, so the strip is the panel's whole top edge. Each strip reads, left to right: the tab capsules with close controls where allowed, the add control (drawn only while that pane holds no guide tab; it opens the guide there through `ctx.sidebarRight.openTab`), the pane's split control, and in the top-right pane the two panel controls. Only the chips give way in a narrow pane; the controls after them never shrink or clip.
 
@@ -100,6 +100,14 @@ Two more seats extend what is already there: `sidebar.right.tab.guide` (chain) r
 
 <a id="the-tab-domain"></a>
 ## The Tab domain
+
+### Product launcher
+
+`ctx.sidebarRight.registerLauncher({ kinds, label, emptyLabel })` replaces the guide's chip and body with a `+` menu and the supplied empty-state label. The returned disposer restores the normal guide presentation; only one product launcher can be registered at a time. `launcher` exposes the current registration as an observable snapshot. Labels may be getters backed by the locale service.
+
+The menu follows the order in `kinds` and includes only kinds with current guide entries. It does not unregister other kinds or change permission checks: callers can still open an unlisted page through the normal navigation API. Selecting an entry replaces the pane's guide when present. The menu opens only when the user presses `+`, never by itself: not on load, not when a pane holds its guide, and not when closing the final content page leaves the pane expanded and empty — that pane shows `emptyLabel` instead. Background retained tab hosts never publish a launcher popup. Popup placement uses the menu's measured dimensions and flips around the trigger when the preferred edge cannot fit.
+
+### Lifetime
 
 The Tab domain retains a branded occurrence id, navigation, an abort signal, and bound actions per (Session, tab id). A private assembly callback adopts each Session's store, reconciles restored records immediately, and follows its commits. Reconstructing a Session store replaces its adoption, releasing the old subscription and cleanup reference. Only record removal or plugin unload aborts the signal; closing the sidebar and switching Sessions retain records, while undo restores a new occurrence. `useTabInfo()` composes framework-bound store and navigation hooks without manual component subscriptions or render-time record creation. `tab.actions` always target their own Session; `tab.visible` distinguishes bodies from titles and excludes background Sessions; foreground floating tabs remain visible when the sidebar closes. `adopt` is absent from the public controller.
 

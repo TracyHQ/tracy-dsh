@@ -47,7 +47,7 @@ const publicNativePackages = new Set([
 ])
 /** Deliberate source payloads whose exact bytes are part of the package's audit surface. */
 const publicationSourceAllowlist: Readonly<Record<string, readonly string[]>> = {
-  '@deepseek-ai/node-addon-system': ['src/main.c', 'src/flock.c'],
+  '@deepseek-ai/node-addon-system': ['src/main.c', 'src/addon.c', 'src/system.h', 'src/flock.c', 'src/dirfd.c'],
 }
 /** Public source home recorded in maintained package manifests. */
 const publishedRepositoryUrl = 'git+https://github.com/deepseek-ai/deepseek-harness.git'

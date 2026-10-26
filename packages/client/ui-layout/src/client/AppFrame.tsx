@@ -15,14 +15,22 @@
  * shares — zero cordis or framework imports, zero self-made hooks.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import type {
   PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
 } from '@deepseek-ai/dsh-client-ui-slots'
-import { CENTER_MIN, clampWidth, computeColumns, RIGHTBAR_DEFAULT_RATIO, RIGHTBAR_MAX_RATIO, RIGHTBAR_MIN, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT } from './columns.ts'
+import {
+  CHAT_COMPACT_FRAME, CHAT_DEFAULT_MIN, CHAT_MIN, chatDefault, chatRange, clampChat, computeColumns,
+  RIGHTBAR_DRAG_MIN, RIGHTBAR_MAX_RATIO, RIGHTBAR_NO_CEILING, RIGHTBAR_PREFERRED, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED,
+  SIDEBAR_DEFAULT, sidebarTrack,
+} from './columns.ts'
+import { CHAT_WIDTH_KEY, parseChatWidth, writeChatWidth } from './chat-width.ts'
 import { DocumentTitle } from './DocumentTitle.tsx'
 import type { createLayoutStore } from './stores.ts'
 import css from './AppFrame.module.css'
+
+/** Arrow-key step of the Conversation divider, in px. */
+const CHAT_KEY_STEP = 16
 
 /** Full composed props: runtime share + child-slot render share + store share. */
 export type AppFrameProps =
@@ -55,7 +63,22 @@ function RightbarColumn(props: { children?: ReactNode }) {
  * One drag handle: pointer capture, rAF-throttled dx reports against the drag-start origin.
  * `side` keys the hover-reveal CSS to the owning column.
  */
-function DragHandle(props: { side: 'sidebar' | 'rightbar'; left: number; onStart: () => void; onDrag: (dx: number) => void; onEnd: () => void }) {
+function DragHandle(props: {
+  side: 'sidebar' | 'rightbar'
+  left: number
+  onStart: () => void
+  onDrag: (dx: number) => void
+  onEnd: () => void
+  /** Keyboard and reset affordances; present only on a handle that has them. */
+  separator?: {
+    label: string
+    now: number
+    min: number
+    max: number
+    onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => void
+    onReset: () => void
+  }
+}) {
   const [dragging, setDragging] = useState(false)
   const origin = useRef(0)
   const latest = useRef(0)
@@ -102,12 +125,24 @@ function DragHandle(props: { side: 'sidebar' | 'rightbar'; left: number; onStart
     if (capture.current?.id === e.pointerId) endDrag()
   }, [endDrag])
 
+  const separator = props.separator
   return (
     <div
       className={css.handle}
       style={{ left: props.left }}
       data-side={props.side}
       data-dragging={dragging || undefined}
+      {...(separator === undefined ? {} : {
+        'role': 'separator',
+        'aria-orientation': 'vertical' as const,
+        'aria-label': separator.label,
+        'aria-valuenow': separator.now,
+        'aria-valuemin': separator.min,
+        'aria-valuemax': separator.max,
+        'tabIndex': 0,
+        'onKeyDown': separator.onKeyDown,
+        'onDoubleClick': separator.onReset,
+      })}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -115,6 +150,41 @@ function DragHandle(props: { side: 'sidebar' | 'rightbar'; left: number; onStart
       onLostPointerCapture={onPointerCancel}
     />
   )
+}
+
+/**
+ * The CSS custom properties the track formula in AppFrame.module.css reads,
+ * written as browser expressions of the frame width (`100%`) so that the
+ * browser keeps them right through a window resize before the next JS solve.
+ * @param viewport - frame width in px; a compact frame gets px values.
+ * @param sidebar - sidebar track width in px.
+ * @param chat - the dragged Conversation width in px, or null for the default.
+ * @param preferred - the right panel's preferred width in px.
+ * @param track - whether the right panel takes a grid track.
+ * @param ceiling - the widest the right panel may be, in px (RIGHTBAR_NO_CEILING for none).
+ * @returns the custom property map.
+ */
+function frameTrackInputs(
+  viewport: number, sidebar: number, chat: number | null, preferred: number, track: boolean, ceiling: number,
+): Record<string, string> {
+  const usable = `(100% - ${sidebar}px)`
+  const compact = viewport <= CHAT_COMPACT_FRAME
+  const capped = Number.isFinite(ceiling)
+  const panelDefault = Math.min(preferred, ceiling)
+  // Tracy: an unbounded preferred width (RIGHTBAR_PREFERRED) leaves the Conversation at its floor.
+  const defaultChat = compact ? `${CHAT_MIN}px`
+    : Number.isFinite(panelDefault) ? `max(${CHAT_DEFAULT_MIN}px, calc(${usable} - ${panelDefault}px))` : `${CHAT_DEFAULT_MIN}px`
+  const unbounded = `max(${RIGHTBAR_MAX_RATIO * 100}%, calc(${usable} - ${defaultChat}))`
+  // Tracy: a ceiling raises the Conversation's floor, which clamp() lets win over the drag ceiling.
+  const widest = capped ? `min(${unbounded}, ${ceiling}px)` : unbounded
+  return {
+    '--dsh-frame-sidebar': `${sidebar}px`,
+    '--dsh-frame-chat': chat === null ? defaultChat : `${Math.max(CHAT_MIN, Math.round(chat))}px`,
+    '--dsh-frame-chat-min': `${CHAT_MIN}px`,
+    '--dsh-frame-chat-lo': `max(${CHAT_MIN}px, calc(${usable} - ${widest}))`,
+    '--dsh-frame-chat-hi': `calc(${usable} - ${RIGHTBAR_DRAG_MIN}px)`,
+    '--dsh-frame-rightbar-track': track ? '1' : '0',
+  }
 }
 
 /** The three-column frame (see module doc). */
@@ -162,26 +232,47 @@ export function AppFrame({
   const sidebarPreference = sidebarCollapsed
     ? 0
     : layoutInfo.sidebar === 0 ? SIDEBAR_DEFAULT : layoutInfo.sidebar
-  const rightbarPreference = layoutInfo.rightbar ?? viewport * RIGHTBAR_DEFAULT_RATIO
+  // Tracy (14/10/2026): a tab's preferred width no longer sizes the panel; every tab opens beside
+  // the same narrow Conversation (columns.ts). layoutInfo.rightbarPreferred is still recorded.
+  const preferred = RIGHTBAR_PREFERRED
+  // Tracy: the active tab's ceiling, applied on every read; the stored Conversation width is untouched.
+  const ceiling = layoutInfo.rightbarMax ?? RIGHTBAR_NO_CEILING
   // Desktop reopen controls occupy the frame's shell.leading seat (macOS) or
   // the Windows caption row; neither platform keeps an icon rail.
   const darwin = document.documentElement.dataset.platform === 'darwin'
-  const collapsedWidth = darwin
+  // An embedding desktop shell whose sidebar occupant keeps an icon rail when collapsed marks
+  // <html data-desktop-sidebar-rail>: the collapsed column keeps the rail width on macOS too, and the
+  // occupant clears the traffic lights itself, so the shell.leading seat stays unmounted.
+  const railKept = darwin && document.documentElement.hasAttribute('data-desktop-sidebar-rail')
+  const collapsedWidth = (darwin && !railKept)
     || document.documentElement.hasAttribute('data-windows-titlebar') ? 0 : SIDEBAR_COLLAPSED
   // Opening on a narrow frame collapses the left sidebar. Eligibility must
   // include that space before the occupant's first shown report arrives.
-  const normal = computeColumns(viewport, !layoutInfo.rightbarShown && narrow ? 0 : sidebarPreference, rightbarPreference, collapsedWidth)
-  const cols = computeColumns(viewport, sidebarPreference, layoutInfo.rightbarTrack ? rightbarPreference : 0, collapsedWidth)
+  // Until the user drags the divider, the Conversation takes what the right
+  // panel's preferred width leaves; the default follows the sidebar it sits beside.
+  const chatFor = (sidebar: number) => layoutInfo.chat ?? chatDefault(viewport, sidebarTrack(sidebar, collapsedWidth), preferred, ceiling)
+  const normalSidebar = !layoutInfo.rightbarShown && narrow ? 0 : sidebarPreference
+  const normal = computeColumns(viewport, normalSidebar, chatFor(normalSidebar), collapsedWidth, preferred, ceiling)
+  const cols = computeColumns(viewport, sidebarPreference, layoutInfo.rightbarTrack ? chatFor(sidebarPreference) : null, collapsedWidth, preferred, ceiling)
   const colsRef = useRef(cols)
   colsRef.current = cols
-  const rightbarWidth = useRef(normal.rightbar)
-  rightbarWidth.current = normal.rightbar
+  // The Conversation width beside the open right panel, as rendered.
+  const chatWidth = useRef(normal.center)
+  chatWidth.current = normal.center
+  const viewportRef = useRef(viewport)
+  viewportRef.current = viewport
+  const preferredRef = useRef(preferred)
+  preferredRef.current = preferred
+  const ceilingRef = useRef(ceiling)
+  ceilingRef.current = ceiling
 
   // The drag base is the rendered width captured at drag start (grabbing a
   // concession-clamped panel must not jump back to the stored preference);
   // it stays frozen for the whole gesture so dx deltas do not compound.
   const sidebarBase = useRef(0)
-  const rightbarBase = useRef(0)
+  const chatBase = useRef(0)
+  // The width the current chat drag last asked for; saved once, on release.
+  const chatDragged = useRef<number | null>(null)
   // Track-level transitions pause for the whole gesture: eased tracks would
   // detach the column edge from the pointer (AppFrame.module.css).
   const [dragging, setDragging] = useState(false)
@@ -194,7 +285,10 @@ export function AppFrame({
   // chase the live window edge. The counter restarts the settle window when a
   // re-toggle interrupts a running transition.
   const [animating, setAnimating] = useState(0)
-  const trackToggle = `${sidebarCollapsed}:${layoutInfo.rightbarTrack}`
+  // A switch between right-panel tabs that prefer different widths moves the
+  // default divider; it eases like a toggle until the user has dragged it. A
+  // switch between tabs with different ceilings eases the same way.
+  const trackToggle = `${sidebarCollapsed}:${layoutInfo.rightbarTrack}:${layoutInfo.chat === null ? preferred : 'dragged'}:${ceiling}`
   const previousToggle = useRef(trackToggle)
   const previousViewport = useRef(viewport)
   useLayoutEffect(() => {
@@ -226,9 +320,54 @@ export function AppFrame({
   const onSidebarDrag = useCallback((dx: number) => {
     actions.setSidebar(sidebarBase.current + dx)
   }, [actions])
-  const onRightbarStart = useCallback(() => { rightbarBase.current = rightbarWidth.current; setDragging(true) }, [])
-  const onRightbarDrag = useCallback((dx: number) => {
-    actions.setRightbar(rightbarBase.current - dx)
+  const onChatStart = useCallback(() => {
+    chatBase.current = chatWidth.current
+    chatDragged.current = null
+    setDragging(true)
+  }, [])
+  const onChatDrag = useCallback((dx: number) => {
+    // Tracy: under a ceiling, a press that never moved keeps the width the user chose for other tabs.
+    if (dx === 0 && chatDragged.current === null && Number.isFinite(ceilingRef.current)) return
+    chatDragged.current = clampChat(chatBase.current + dx, viewportRef.current, colsRef.current.sidebar, preferredRef.current, ceilingRef.current)
+    actions.setChat(chatDragged.current)
+  }, [actions])
+  // Saved on release, not per frame: the drag writes the store at pointer cadence.
+  const onChatEnd = useCallback(() => {
+    setDragging(false)
+    if (chatDragged.current !== null) writeChatWidth(chatDragged.current)
+    chatDragged.current = null
+  }, [])
+  const onChatReset = useCallback(() => {
+    actions.resetChat()
+    writeChatWidth(null)
+  }, [actions])
+  const onChatKey = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const current = chatWidth.current
+    const range = chatRange(viewportRef.current, colsRef.current.sidebar, preferredRef.current, ceilingRef.current)
+    const target = e.key === 'ArrowLeft' ? current - CHAT_KEY_STEP
+      : e.key === 'ArrowRight' ? current + CHAT_KEY_STEP
+        : e.key === 'Home' ? range.min
+          : e.key === 'End' ? range.max
+            : e.key === 'Enter' ? null
+              : undefined
+    if (target === undefined) return
+    e.preventDefault()
+    e.stopPropagation()
+    if (target === null) { onChatReset(); return }
+    const px = clampChat(target, viewportRef.current, colsRef.current.sidebar, preferredRef.current, ceilingRef.current)
+    actions.setChat(px)
+    writeChatWidth(px)
+  }, [actions, onChatReset])
+  // Another tab of this browser saved or forgot a width: follow it.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== CHAT_WIDTH_KEY) return
+      const px = parseChatWidth(e.key === null ? null : e.newValue)
+      if (px === null) actions.resetChat()
+      else actions.setChat(px)
+    }
+    window.addEventListener('storage', onStorage)
+    return () => { window.removeEventListener('storage', onStorage) }
   }, [actions])
   const productTitle = process.env.DSH_CLIENT_TITLE ?? t('brand.localBuild')
   // The rendered template lets the grid solve the squeeze natively: the centre
@@ -238,7 +377,11 @@ export function AppFrame({
   // it priced the squeeze itself, the centre column absorbed each width change
   // whole and was corrected two frames later — visible jitter. cols keeps only
   // the discrete decisions (track present, collapse state) and the drag base.
-  const rightbarMax = cols.rightbar === 0 ? 0 : clampWidth(rightbarPreference, RIGHTBAR_MIN, viewport * RIGHTBAR_MAX_RATIO)
+  // Inputs of the track formula in AppFrame.module.css. The browser computes
+  // the default Conversation width and clamps a dragged one itself (both
+  // mirroring columns.ts), so a window resize needs no JS round trip; the JS
+  // solve only decides whether the right track exists.
+  const frameTracks = frameTrackInputs(viewport, cols.sidebar, layoutInfo.chat, preferred, cols.rightbar > 0, ceiling)
   const sidebar = useMemo(() => renderSlot('sidebar', {
     collapsed: sidebarCollapsed,
     width: cols.sidebar,
@@ -253,7 +396,7 @@ export function AppFrame({
   // row (ui-sidebar). AppFrame.module.css publishes the matching
   // --dsh-frame-leading-clearance under the same collapsed condition.
   const leading = useMemo(() => renderSlot('shell.leading', {}), [renderSlot])
-  const leadingMounted = darwin && sidebarCollapsed
+  const leadingMounted = darwin && sidebarCollapsed && !railKept
 
   return (
     <div
@@ -262,9 +405,8 @@ export function AppFrame({
       style={{
         ...(document.documentElement.hasAttribute('data-windows-titlebar')
           ? { '--dsh-windows-sidebar-width': `${cols.sidebar}px` } : {}),
-        gridTemplateColumns:
-          `${cols.sidebar}px minmax(${cols.rightbar === 0 ? 0 : CENTER_MIN}px, 1fr) minmax(0px, ${rightbarMax}px)`,
-      }}
+        ...frameTracks,
+      } as CSSProperties}
       data-sidebar-collapsed={sidebarCollapsed || undefined}
       data-rightbar-collapsed={cols.rightbar === 0 || undefined}
       data-rightbar-fullscreen={layoutInfo.rightbarFullscreen || undefined}
@@ -297,7 +439,20 @@ export function AppFrame({
       {/* The collapsed rail is fixed-width: no resize handle while closed. */}
       {!sidebarCollapsed && <DragHandle side="sidebar" left={cols.sidebar} onStart={onSidebarStart} onDrag={onSidebarDrag} onEnd={onDragEnd} />}
       {layoutInfo.rightbarShown && !layoutInfo.rightbarFullscreen && normal.rightbar > 0 && (
-        <DragHandle side="rightbar" left={viewport - normal.rightbar} onStart={onRightbarStart} onDrag={onRightbarDrag} onEnd={onDragEnd} />
+        <DragHandle
+          side="rightbar"
+          left={viewport - normal.rightbar}
+          onStart={onChatStart}
+          onDrag={onChatDrag}
+          onEnd={onChatEnd}
+          separator={{
+            label: t('layout.resizeChat'),
+            now: normal.center,
+            ...chatRange(viewport, normal.sidebar, preferred, ceiling),
+            onKeyDown: onChatKey,
+            onReset: onChatReset,
+          }}
+        />
       )}
     </div>
   )

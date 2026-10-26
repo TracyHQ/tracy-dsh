@@ -48,7 +48,7 @@ type AskUserQuestionIntent = {
 
 ## Question item
 
-`AskUserQuestionItem` is one question in a request. The caller supplies a stable `id`, which is echoed back with the answer so batched questions remain routable. Optional `detail` carries supporting text that providers render with the question but keep out of selectable option labels.
+`AskUserQuestionItem` is one question in a request. The caller supplies a stable `id`, which is echoed back with the answer so batched questions remain routable. Optional `detail` carries supporting text that providers render with the question but keep out of selectable option labels. Optional `recommended` names the option label the asker would pick itself; capable UIs show it as the default. `ask()` drops a `recommended` that names none of the question's options instead of failing the request. It takes precedence over the older "(Recommended)" label suffix, which stays on the label.
 
 ```ts type-equiv
 /** One question in a user-questions request. */
@@ -65,6 +65,13 @@ interface AskUserQuestionItem {
   options?: AskUserQuestionOption[]
   /** Whether more than one option may be selected. Defaults to single-select. */
   multiSelect?: boolean
+  /**
+   * Label of the option the asker would pick itself; capable UIs show it as the
+   * default. Must equal one of `options[].label` — `ask()` drops a value that
+   * names none. Takes precedence over the legacy "(Recommended)" label suffix,
+   * which stays on the label untouched.
+   */
+  recommended?: string
   /** Optional presentation intent for capable UIs; absent asks for the generic option list. */
   intent?: AskUserQuestionIntent
 }
@@ -95,11 +102,17 @@ interface AskUserQuestionAnswerItem {
 }
 ```
 
+`action` says how the human closed the request: `submit` answered it, `decide` left the unanswered questions to the asker, `follow_up` asked for further questions before deciding. An answer without `action` is a submit, so answerers that predate the field keep working; `answerAction()` reads it that way. `note` is optional free text attached to the whole request.
+
 ```ts type-equiv
 /** The human's answer. */
 interface AskUserQuestionAnswer {
   /** Structured answers keyed by question id. */
   answers: AskUserQuestionAnswerItem[]
+  /** How the request was closed; absent means `submit`, so older answerers keep working. */
+  action?: AskUserQuestionAction
+  /** Optional free-text note the human attached to the whole request. */
+  note?: string
 }
 ```
 

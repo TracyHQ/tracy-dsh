@@ -213,6 +213,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'session/writer-held': { readonly sessionId: SessionId }
     'session/agent-busy': { readonly reason: string }
     'session/invalid-time-zone': { readonly value: string }
+    /** A gate stamped `prompter` in a shape the Host cannot read — a bug upstream, refused by name. */
+    'session/invalid-prompter': Record<string, never>
     'session/workspace-attach-failed': { readonly sessionId: SessionId; readonly workspaceId: string }
     'agent-preset/conflict': {
       readonly sessionId: SessionId
@@ -338,6 +340,22 @@ export interface SessionPromptRequest {
   /** At least one non-whitespace text part or attachment. */
   readonly content: readonly PromptContentPart[]
   readonly clientTimeZone?: string
+  /**
+   * Who typed this prompt, as the gate in front of the Host vouches for them.
+   *
+   * The Host has no notion of a person: a session header carries a cwd, a WebSocket carries a
+   * random client id. A gateway that terminated the login writes this onto the request body on
+   * its way in; a bare Host with nothing in front receives none. `user` is the gate's stable
+   * account name, `email` the proven address when the gate has one (null for a master account).
+   * Copied verbatim onto the accepted message's source, so the log names who typed each message.
+   */
+  readonly prompter?: PromptPrompter
+}
+
+/** The person a gate vouches typed a prompt. */
+export interface PromptPrompter {
+  readonly user: string
+  readonly email?: string | null
 }
 
 /** Receipt after one prompt enters the target Agent inbox. */
@@ -399,8 +417,8 @@ export type SessionRequestId = Branded<'session-request-id'>
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    /** Browser prompt correlation and optional Host-validated time zone. */
-    'user-rpc': { kind: 'user'; rpcId: SessionRequestId; clientTimeZone?: string }
+    /** Browser prompt correlation, optional Host-validated time zone, and who typed when a gate says. */
+    'user-rpc': { kind: 'user'; rpcId: SessionRequestId; clientTimeZone?: string; prompter?: PromptPrompter }
   }
 }
 
@@ -616,6 +634,17 @@ declare module '@deepseek-ai/cordis' {
      * @param message - user-safe failure chain.
      */
     'api-session/error'(sessionId: SessionId, message: string): void
+    /**
+     * Decide whether one user follow-up waits in the durable next-turn queue
+     * instead of waking its Agent. Returning `true` holds it: the follow-up
+     * stays editable and removable in the queue until
+     * `sessionController.releaseHeldPrompts` wakes the Agent. Steering is never
+     * held, and a running Agent still claims held follow-ups when its current
+     * turn ends.
+     * @mode bail
+     * @param sessionId - Session receiving the follow-up.
+     */
+    'api-session/prompt-hold'(sessionId: SessionId): boolean | undefined
   }
 }
 

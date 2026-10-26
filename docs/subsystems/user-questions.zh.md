@@ -48,7 +48,7 @@ type AskUserQuestionIntent = {
 
 ## 问题条目
 
-`AskUserQuestionItem` 是请求中的一个问题。调用方提供稳定的 `id`，它会随答案原样返回，使批量问题仍可路由。可选的 `detail` 携带辅助文本；提供方会将其随问题渲染，但不会放入可选选项标签。
+`AskUserQuestionItem` 是请求中的一个问题。调用方提供稳定的 `id`，它会随答案原样返回，使批量问题仍可路由。可选的 `detail` 携带辅助文本；提供方会将其随问题渲染，但不会放入可选选项标签。可选的 `recommended` 指明提问方自己会选的选项标签；有能力的 UI 将其显示为默认项。若 `recommended` 不对应该问题的任何选项，`ask()` 会丢弃它而不是让请求失败。它优先于旧的「(Recommended)」标签后缀，后缀仍保留在标签上。
 
 ```ts type-equiv
 /** One question in a user-questions request. */
@@ -65,6 +65,13 @@ interface AskUserQuestionItem {
   options?: AskUserQuestionOption[]
   /** Whether more than one option may be selected. Defaults to single-select. */
   multiSelect?: boolean
+  /**
+   * Label of the option the asker would pick itself; capable UIs show it as the
+   * default. Must equal one of `options[].label` — `ask()` drops a value that
+   * names none. Takes precedence over the legacy "(Recommended)" label suffix,
+   * which stays on the label untouched.
+   */
+  recommended?: string
   /** Optional presentation intent for capable UIs; absent asks for the generic option list. */
   intent?: AskUserQuestionIntent
 }
@@ -95,11 +102,17 @@ interface AskUserQuestionAnswerItem {
 }
 ```
 
+`action` 说明用户如何结束这次请求：`submit` 表示已作答，`decide` 表示把未回答的问题交给提问方决定，`follow_up` 表示希望先被追问再做决定。不含 `action` 的回答即为 submit，因此早于该字段的回答方仍可正常工作；`answerAction()` 按此读取。`note` 是附在整个请求上的可选自由文本。
+
 ```ts type-equiv
 /** The human's answer. */
 interface AskUserQuestionAnswer {
   /** Structured answers keyed by question id. */
   answers: AskUserQuestionAnswerItem[]
+  /** How the request was closed; absent means `submit`, so older answerers keep working. */
+  action?: AskUserQuestionAction
+  /** Optional free-text note the human attached to the whole request. */
+  note?: string
 }
 ```
 

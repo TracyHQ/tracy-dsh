@@ -61,24 +61,24 @@ describe('todo snapshot invariants', () => {
     }).not.toThrow()
   })
 
-  it('rejects a live snapshot outside an open turn before it enters the log', async () => {
+  it('accepts a live snapshot between turns: the log admits a standalone log-only event there', async () => {
     const ctx = await setup()
     const session = ctx.sessions.create()
     session.append('turn/start', { turn: 1 })
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    const before = session.snapshotEvents()
+    const before = session.snapshotEvents().length
 
-    expect(() => session.append('todo/write', { todos: [] })).toThrow(/outside any open turn/)
-    expect(session.snapshotEvents()).toEqual(before)
+    expect(() => session.append('todo/write', { todos: [{ content: 'reported by a host job', status: 'in_progress' }] })).not.toThrow()
+    expect(session.snapshotEvents()).toHaveLength(before + 1)
   })
 
-  it('rejects an existing snapshot outside an open turn on late registration', async () => {
+  it('accepts an existing snapshot between turns on late registration', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     ctx.sessions.create().append('todo/write', { todos: [] })
     await ctx.plugin(InvariantRegistry, { enabled: true })
 
-    await expect(ctx.plugin(TodoInvariant).then(() => undefined)).rejects.toThrow(/outside any open turn/)
+    await expect(ctx.plugin(TodoInvariant).then(() => undefined)).resolves.toBeUndefined()
   })
 
   it('rejects an invalid existing snapshot on late registration', async () => {
@@ -106,11 +106,11 @@ describe('todo snapshot invariants', () => {
     expect(() => valid.append('todo/write', { todos: [] })).not.toThrow()
 
     expect(() => ctx.sessions.create(SessionId('todo-seeded-invalid'), { seed: [
-      { type: 'todo/write', seq: SessionSeq(0), time: 1, data: { todos: [] } },
-    ] })).toThrow(/outside any open turn/)
+      { type: 'todo/write', seq: SessionSeq(0), time: 1, data: { todos: [{ content: 'task', status: 'paused' }] } as never },
+    ] })).toThrow(/unknown status/)
   })
 
-  it('tracks events committed before a prepared session is announced', async () => {
+  it('validates a prepared session before and after it is announced', async () => {
     const ctx = await setup()
     const session = ctx.sessions.prepare(SessionId('todo-prepared'))
     const detach = ctx.sessions.enter(session)
@@ -119,7 +119,8 @@ describe('todo snapshot invariants', () => {
       expect(() => session.append('todo/write', { todos: [] })).not.toThrow()
       ctx.sessions.announce(session)
       session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-      expect(() => session.append('todo/write', { todos: [] })).toThrow(/outside any open turn/)
+      expect(() => session.append('todo/write', { todos: [] })).not.toThrow()
+      expect(() => session.append('todo/write', { todos: [{ content: 'task', status: 'paused' }] } as never)).toThrow(/unknown status/)
     } finally {
       detach()
     }

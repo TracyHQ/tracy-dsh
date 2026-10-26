@@ -1,7 +1,9 @@
 /**
  * Build this host's declared system binaries. Landlock is a static musl
- * executable; flock uses stable Node-API with separate Linux libc builds.
- * Node headers come from the Node installation running this script.
+ * executable; the `flock` tool row builds the one `system.node` addon (flock
+ * plus the descriptor-relative dirfd calls) through stable Node-API with
+ * separate Linux libc builds. Node headers come from the Node installation
+ * running this script.
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
@@ -11,9 +13,9 @@ import { parseArgs } from 'node:util'
 const root = resolve(import.meta.dirname, '..')
 const { values } = parseArgs({ options: { 'host-addon-only': { type: 'boolean' } }, allowPositionals: false })
 const hostAddonOnly = values['host-addon-only'] === true
-const sources: Record<string, string> = {
-  'landlock-run': 'packages/entry/src/main.c',
-  flock: 'packages/entry/src/flock.c',
+const sources: Record<string, readonly string[]> = {
+  'landlock-run': ['packages/entry/src/main.c'],
+  flock: ['packages/entry/src/addon.c', 'packages/entry/src/flock.c', 'packages/entry/src/dirfd.c'],
 }
 
 interface Binary {
@@ -77,7 +79,7 @@ for (const name of readdirSync(join(root, 'packages')).sort()) {
     const temporary = mkdtempSync(join(root, '.release', 'native-build-'))
     try {
       const pending = join(temporary, basename(output))
-      const result = spawnSync(compiler, [...flags, '-o', pending, join(root, source)], { stdio: 'inherit' })
+      const result = spawnSync(compiler, [...flags, '-o', pending, ...source.map(file => join(root, file))], { stdio: 'inherit' })
       if (result.error) throw result.error
       if (result.status !== 0) throw new Error(`build: ${compiler} failed for ${binary.path}`)
       // Readers never see a truncated addon when source checks build concurrently.

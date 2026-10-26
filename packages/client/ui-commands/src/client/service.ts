@@ -141,6 +141,9 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
       if (contributions.has(contribution.name)) {
         throw new Error(`ui-commands: duplicate contribution for /${contribution.name}`)
       }
+      if (contribution.caseInsensitive === true && contribution.name !== contribution.name.toLowerCase()) {
+        throw new Error(`ui-commands: caseInsensitive contribution /${contribution.name} must be named in lower case`)
+      }
       contributions.set(contribution.name, contribution)
       return () => { contributions.delete(contribution.name) }
     }, 'command.register()')
@@ -248,11 +251,27 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     return req.query === '' ? sectionRows(visible, this.t) : rankByName(visible, req.query)
   }
 
-  /** Decision table, menu column: contribution/decorated-host → popup or action; host input → claim; host bare → detached execute. */
+  /**
+   * Contribution for a typed name: exact match first; otherwise the lower-cased
+   * name, but only a contribution that opted into `caseInsensitive`.
+   */
+  private contributionFor(typedName: string): CommandContribution | undefined {
+    const exact = this.live.contributions.get(typedName)
+    if (exact !== undefined) return exact
+    const lower = typedName.toLowerCase()
+    if (lower === typedName) return undefined
+    const folded = this.live.contributions.get(lower)
+    return folded?.caseInsensitive === true ? folded : undefined
+  }
+
+  /** Decision table, menu column: text-taking action or host input → claim; contribution/decorated-host → popup or action; host bare → detached execute. */
   private dispatch(pick: InputTriggerPick): PickOutcome {
     const name = pick.candidate.name
     const contribution = this.live.contributions.get(name)
     if (contribution !== undefined && contribution.available(pick.session)) {
+      // Tracy: a text-taking action keeps its token in the draft for the person to type after.
+      const claim = this.textClaim(contribution, pick.session, name)
+      if (claim !== undefined) return { claim }
       this.invoke(name, contribution.ui, pick.session, { via: 'menu', span: pick.span })
       return 'handled'
     }
@@ -274,10 +293,16 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     return 'handled'
   }
 
-  /** Decision table, space column: hot-key sync check; only host leadingInput claims. */
+  /** Decision table, space column: hot-key sync check; host leadingInput and text-taking actions claim. */
   private matchSpace(session: ClientSessionContext, token: string): PickOutcome {
     if (!token.startsWith('/')) return undefined
-    if (this.live.contributions.has(token.slice(1))) return undefined // popup and action kinds never claim on space
+    const contribution = this.contributionFor(token.slice(1))
+    if (contribution !== undefined) {
+      // Popup and plain action kinds never claim on space; a text-taking action claims the typed spelling.
+      if (!contribution.available(session)) return undefined
+      const claim = this.textClaim(contribution, session, token.slice(1))
+      return claim === undefined ? undefined : { claim }
+    }
     const desc = this.directory.resolve(session.sessionId, token.slice(1))
     if (desc === undefined || desc.input === undefined) return undefined
     return { claim: this.leadingClaim(desc, session, token.slice(1)) }
@@ -315,11 +340,18 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
     const refuseAttachments = (): never => {
       throw new Error(this.t('notice.attachmentsUnsupported', { command: typedName }))
     }
-    const contribution = this.live.contributions.get(typedName)
+    const contribution = this.contributionFor(typedName)
     if (contribution !== undefined && contribution.available(session)) {
-      if (!bare) return undefined
+      if (!bare) {
+        // An action that takes text claims the whole argued line: it is consumed
+        // here and never becomes an agent message.
+        if (contribution.ui.kind !== 'action' || contribution.ui.takesText !== true) return undefined
+        if (envelope.attachments > 0) refuseAttachments()
+        this.invokeLine(contribution.ui, session, trimmed, trimmed.slice(token.length).trim())
+        return 'handled'
+      }
       if (envelope.attachments > 0 && contribution.ui.kind !== 'action') refuseAttachments()
-      this.invoke(typedName, contribution.ui, session, { via: 'enter', token })
+      this.invoke(contribution.name, contribution.ui, session, { via: 'enter', token })
       return 'handled'
     }
     await this.directory.ensureReady(session.sessionId, signal)
@@ -349,6 +381,48 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
   }
 
   /**
+   * Run a text-taking action for an argued line: clear the draft only when it
+   * still equals the line that was adjudicated, then hand over the text.
+   */
+  private invokeLine(
+    ui: Extract<CommandContribution['ui'], { kind: 'action' }>,
+    session: ClientSessionContext,
+    line: string,
+    text: string,
+  ): void {
+    const actx = this.scopeFor(session.sessionId)
+    actx?.bail(actx, 'slash/input-consume-token', { guard: { kind: 'line', line } })
+    ui.run(session, text)
+  }
+
+  /**
+   * Tracy: the claim of a text-taking action (`takesText`), for a menu pick and for Space after
+   * its name. The composer keeps `/<shown> ` in the draft (styled like any claimed command, with
+   * the action's ghost hint while nothing follows it), and Enter hands the text after the token to
+   * `run` on this client: nothing is executed on the Host and nothing reaches the agent. An empty
+   * text is the bare invocation. Attachments are refused by the composer before submit, because the
+   * claim does not declare them (the same notice the argued-line path raises).
+   * @param contribution - the contribution the name resolved to.
+   * @param session - the ClientSessionContext captured at pick or Space.
+   * @param shown - the spelling the draft carries (the registered name for a pick, the typed one for Space).
+   * @returns the claim, or undefined for any other kind of contribution.
+   */
+  private textClaim(contribution: CommandContribution, session: ClientSessionContext, shown: string): CommandClaim | undefined {
+    const ui = contribution.ui
+    if (ui.kind !== 'action' || ui.takesText !== true) return undefined
+    const hint = ui.hint?.()
+    return {
+      name: contribution.name,
+      token: `/${shown} `,
+      ...(hint === undefined || hint === '' ? {} : { hint }),
+      submit: (args) => {
+        ui.run(session, args.trim())
+        return Promise.resolve({ kind: 'success' })
+      },
+    }
+  }
+
+  /**
    * Invoke one contribution or decoration (menu pick / bare enter): open the
    * session's popup, or consume the token and run the action.
    */
@@ -360,7 +434,7 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
   ): void {
     if (ui.kind === 'action') {
       this.consumeVia(session.sessionId, segment)
-      ui.run(session)
+      ui.run(session, '')
       return
     }
     const actx = this.scopeFor(session.sessionId)

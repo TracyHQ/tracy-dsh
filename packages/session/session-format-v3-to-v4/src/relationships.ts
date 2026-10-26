@@ -329,6 +329,13 @@ class Relationships {
   }
 }
 
+// Tracy: the repair text is branded (core/session repair.ts `notStarted`), and logs written
+// before the rebrand carry the upstream wording — a stored repair is exact when it is either.
+const TOOL_NOT_STARTED_REPAIR_TEXTS: ReadonlySet<string> = new Set([
+  'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.',
+  'The tool call was interrupted before Tracy recorded it as started. Retry it if it is still needed.',
+])
+
 function notStartedRepair(
   event: SessionFormatEvent, data: SessionFormatJsonObject, message: SessionFormatJsonObject, callId: string,
 ): boolean {
@@ -343,7 +350,7 @@ function notStartedRepair(
   const block = content[0]
   return id.startsWith(prefix) && /^(0|[1-9]\d*)$/.test(suffix) && Number.isSafeInteger(Number(suffix))
     && content.length === 1 && isSessionFormatJsonObject(block) && block['type'] === 'text'
-    && block['text'] === 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.'
+    && typeof block['text'] === 'string' && TOOL_NOT_STARTED_REPAIR_TEXTS.has(block['text'])
 }
 
 function titleSources(

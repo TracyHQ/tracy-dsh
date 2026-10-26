@@ -117,9 +117,23 @@ function cookieValue(headerValue: string, name: string): string | undefined {
   return undefined
 }
 
-/** Serialize the fixed browser-session attributes; generated names and values are cookie-safe base64url. */
-function sessionCookie(name: string, value: string, expiresAt: number, maxAgeSeconds: number): string {
-  return `${name}=${value}; Max-Age=${String(maxAgeSeconds)}; Path=/; Expires=${new Date(expiresAt).toUTCString()}; HttpOnly; SameSite=Strict`
+/**
+ * Serialize the fixed browser-session attributes; generated names and values are cookie-safe base64url.
+ * `path` is the mount prefix the page lives under, or `/` at the root: a cookie scoped to
+ * `/site.example` is sent to `/site.example` and everything below it, and to nothing beside it.
+ */
+function sessionCookie(name: string, value: string, expiresAt: number, maxAgeSeconds: number, path: string): string {
+  return `${name}=${value}; Max-Age=${String(maxAgeSeconds)}; Path=${path}; Expires=${new Date(expiresAt).toUTCString()}; HttpOnly; SameSite=Strict`
+}
+
+/**
+ * Where the clean redirect after a token exchange goes. At the root, upstream's directory-relative
+ * `./`. Under a mount the webserver stripped (Tracy's proxy names it in `x-forwarded-prefix`), the
+ * mount's slash form: a lane entered as `/<site>` without its trailing slash would resolve `./`
+ * to the host's root, where nothing of this dsh listens.
+ */
+function cleanLocation(mount: string): string {
+  return mount === '' ? './' : `${mount}/`
 }
 
 function signature(secret: Buffer, body: string): Buffer {
@@ -228,14 +242,17 @@ export class BrowserAuth {
 
   /**
    * Authenticate an index request. A valid root query token mints the cookie
-   * and redirects to the directory-relative clean `./`; a valid cookie lets
-   * the caller serve the index; every other request receives the same minimal
-   * 401 response.
-   * @param req - incoming root or configured-index request.
+   * and redirects to the directory-relative clean `./` — or, under a mount the
+   * webserver stripped, to that mount's slash form; a valid cookie lets the
+   * caller serve the index; every other request receives the same minimal 401
+   * response.
+   * @param req - incoming root or configured-index request, its URL already stripped of any mount prefix.
    * @param res - response owned when this method returns false.
+   * @param mount - the mount prefix the page is served under ('' at the root), from the webserver;
+   * the cookie is scoped to it and the clean redirect returns to it.
    * @returns true only when the caller may serve index.html.
    */
-  authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse): boolean {
+  authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse, mount = ''): boolean {
     /* v8 ignore next -- node:http always supplies url on server requests. */
     const url = new URL(req.url ?? '/', 'http://dsh.invalid')
     const tokens = url.searchParams.getAll(TOKEN_QUERY)
@@ -253,10 +270,10 @@ export class BrowserAuth {
         }, this.secret)
         res.writeHead(303, {
           'cache-control': 'no-store',
-          'location': './',
+          'location': cleanLocation(mount),
           'referrer-policy': 'no-referrer',
           'set-cookie': sessionCookie(
-            cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000),
+            cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000), mount || '/',
           ),
         })
         res.end()
@@ -265,7 +282,7 @@ export class BrowserAuth {
       if (req.method === 'GET' && url.pathname === '/' && this.isAuthenticated(req)) {
         res.writeHead(303, {
           'cache-control': 'no-store',
-          'location': './',
+          'location': cleanLocation(mount),
           'referrer-policy': 'no-referrer',
         })
         res.end()

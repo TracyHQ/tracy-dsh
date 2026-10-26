@@ -43,7 +43,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SidebarRightNavigationParams, SidebarRightResourceParams, SidebarRightTabParamsFor } from './contract/params.ts'
 import { pageAddress } from './contract/seed.ts'
 import type { SidebarRightTabClaim, SidebarRightTabRegistry } from './tab-registry.ts'
-import { canCloseTab, type SidebarRightState, type SurfaceState } from './stores.ts'
+import { activeTabKindOf, canCloseTab, keepsLastOf, type SidebarRightState, type SurfaceState } from './stores.ts'
 import type { createSidebarRightStore } from './stores.ts'
 import { TabDomain, type PinResource } from './tab-domain.ts'
 import { SidebarTabInventory } from './tab-inventory.ts'
@@ -133,6 +133,12 @@ export interface SidebarRightHost {
    */
   readonly autoFullscreen: () => boolean
   /**
+   * Tracy: whether the call in progress was caused by a person's gesture (the page's transient user
+   * activation). Absent counts as a gesture, so a host that cannot say keeps the upstream rule.
+   * @returns `true` while a click, key or touch is still active.
+   */
+  readonly userGesture?: () => boolean
+  /**
    * Commit a page operation and focus the pane it selects.
    * @param sessionId - the Session whose page is opening.
    * @param open - the synchronous operation; returns the selected pane, or `undefined` when unchanged.
@@ -182,8 +188,26 @@ const RESOURCE_SCHEME = 'dsh-resource://'
 /** Synchronous close/replacement hook; resource owners retain any background cleanup. */
 export type SidebarRightCloseHandler = (sessionId: SessionId, tab: TabRecord) => void
 
+/** Product-supplied menu presentation for the strip's add control. */
+export interface SidebarRightLauncher {
+  /** Offered kinds, in menu order. Unlisted kinds remain registered and openable. */
+  readonly kinds: readonly string[]
+  /** Localized accessible name of the add control. */
+  readonly label: string
+  /** Localized text shown when the pane holds only its guide. */
+  readonly emptyLabel: string
+}
+
 /** The outward right-Sidebar face (`ctx.sidebarRight`). */
 export interface ISidebarRight {
+  /** Active menu presentation; absent preserves the shipped guide page. */
+  readonly launcher: ObservableSnapshot<SidebarRightLauncher | undefined>
+  /**
+   * Replace guide-page entry with a product's add menu without disabling types.
+   * @param launcher - offered kinds and localized control/empty-state labels.
+   * @returns a disposer restoring the guide presentation. Only one owner may register.
+   */
+  registerLauncher(launcher: SidebarRightLauncher): () => void
   /**
    * The Session on screen, or `undefined` while none is (a global panel fills
    * the main column, or no Session is selected). It changes before React
@@ -260,6 +284,18 @@ export interface ISidebarRight {
 
 /** Cross-plugin right-Sidebar face (ctx.sidebarRight). */
 export class SidebarRightController implements ISidebarRight {
+  private readonly launcherState = createSnapshotStore<SidebarRightLauncher | undefined>(undefined)
+  /** Product presentation source; see {@link ISidebarRight.launcher}. */
+  readonly launcher: ObservableSnapshot<SidebarRightLauncher | undefined> = this.launcherState
+
+  /** @param launcher - product menu presentation. @returns its effect-scoped disposer. */
+  registerLauncher(launcher: SidebarRightLauncher): () => void {
+    if (this.launcherState.getSnapshot() !== undefined) throw new Error('sidebarRight: launcher already registered')
+    this.launcherState.set(launcher)
+    return () => {
+      if (this.launcherState.getSnapshot() === launcher) this.launcherState.set(undefined)
+    }
+  }
   /** Open tab metadata across saved and adopted Sessions, independent of visible seats. */
   readonly openTabs: SidebarTabInventory['source']
   /** The on-screen Session; see {@link ISidebarRight.mounted}. */
@@ -285,6 +321,9 @@ export class SidebarRightController implements ISidebarRight {
    * store's commits, read by the seat for each body's owner share.
    */
   readonly tabDomain: TabDomain
+
+  /** Tracy: whether a kind keeps its last tab, from the types in force (`canCloseTab`). */
+  private readonly keepsLast = keepsLastOf(kind => this.tabs.get(kind))
 
   /**
    * @param tabs - the tab-type registry consulted to claim an address.
@@ -372,7 +411,7 @@ export class SidebarRightController implements ISidebarRight {
     const surface = this.adopted.get(sessionId)?.store.getSnapshot().bySession[sessionId]
     if (actions === undefined || surface === undefined) return
     const tab = surface.layout.tabs[tabId]
-    if (tab === undefined || !canCloseTab(surface, tabId)) return
+    if (tab === undefined || !canCloseTab(surface, tabId, this.keepsLast)) return
     this.removeAfterCleanup(sessionId, tab, () => { actions.closeTab(sessionId, tabId) })
   }
 
@@ -429,6 +468,11 @@ export class SidebarRightController implements ISidebarRight {
       && dockPaneIds(surface.layout).length < 2
       && this.mounted.getSnapshot() === sessionId
       && this.canSplitPane(sessionId, target.id)
+    // Tracy (TCH K1): on a frame that presents the panel fullscreen, an open no person's gesture caused
+    // (a page's own open after load) lands its tab without covering the conversation; the person
+    // opens the column with its toggle. A pressed open, a wide frame, and an expanded panel are unchanged.
+    const reveal = (surface?.layout.expanded ?? false) || !this.host.autoFullscreen()
+      || (this.host.userGesture?.() ?? true)
     const commit = (): void => { actions.openContent(sessionId, {
       kind: claim.kind,
       contentId: claim.contentId,
@@ -437,6 +481,7 @@ export class SidebarRightController implements ISidebarRight {
       ...preferNewPane ? { preferNewPane: true } : {},
       ...placement.replaceTab === undefined ? {} : { replaceTab: placement.replaceTab },
       ...placement.revealIfOpened === undefined ? {} : { revealIfOpened: placement.revealIfOpened },
+      ...reveal ? {} : { reveal: false },
     }, (tabId) => { this.tabDomain.navigate(sessionId, tabId, { address, params }) }) }
     const layout = surface?.layout
     const replaced = placement.replaceTab === undefined ? undefined : layout?.tabs[placement.replaceTab]
@@ -568,7 +613,7 @@ export class SidebarRightController implements ISidebarRight {
     const tabId = target.tabId
     const { sessionId, actions } = this.require()
     this.host.closeWithFocus(sessionId, target.paneId, () => {
-      if (canCloseTab(surface, tabId)) this.close(tabId)
+      if (canCloseTab(surface, tabId, this.keepsLast)) this.close(tabId)
       else actions.setExpanded(sessionId, false)
     })
     return 'closed'
@@ -610,13 +655,18 @@ export class SidebarRightController implements ISidebarRight {
 
   /**
    * Toggle the right panel's display mode through the same action as its chrome button.
-   * @param target - captured dock pane; floating and stale targets are unchanged.
+   * @param target - captured dock pane; floating and stale targets are unchanged, and so is every
+   *   target while the active tab's type names a `maxWidth` on a frame above the automatic fullscreen width.
    */
   toggleFullscreen(target: SidebarRightTarget): void {
     if (!this.isTargetCurrent(target) || target.host === 'float' || !this.isExpanded()) return
     const { sessionId, actions } = this.require()
     const autoFullscreen = this.host.autoFullscreen()
-    const fullscreen = autoFullscreen || this.mountedSurface()?.layout.mode === 'fullscreen'
+    // Tracy: a tab type with a width ceiling is never presented fullscreen (the seat hides the switch).
+    const surface = this.mountedSurface()
+    const kind = surface === undefined ? undefined : activeTabKindOf(surface.layout)
+    if (!autoFullscreen && kind !== undefined && this.tabs.get(kind)?.maxWidth !== undefined) return
+    const fullscreen = autoFullscreen || surface?.layout.mode === 'fullscreen'
     if (fullscreen && autoFullscreen) actions.setExpanded(sessionId, false)
     actions.setMode(sessionId, fullscreen ? 'push' : 'fullscreen')
   }

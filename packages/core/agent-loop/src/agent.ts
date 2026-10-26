@@ -51,6 +51,12 @@ type Phase =
 
 type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }>
 
+/** Inbox messages one step boundary claimed, by the pending list each came from. */
+interface ClaimedBatch {
+  readonly nextStep: readonly UserMessage[]
+  readonly nextTurn: readonly UserMessage[]
+}
+
 type PreparedStep =
   | { kind: 'reject' }
   | {
@@ -58,6 +64,7 @@ type PreparedStep =
     messages: UserMessage[]
     startsRequestSeries?: true
     assembly: PromptAssembly
+    claimed: ClaimedBatch
   }
 
 /** Remove adapter-derived values before plugins propose the next request config. */
@@ -268,21 +275,59 @@ export class ReactLoopAgent implements Agent {
     /* v8 ignore next -- private callers establish the running phase before proposing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": pre-step outside running phase`)
     const signal = this.phase.abort.signal
+    const claimedSteps = this.inbox.nextStep.length
     const claimed = this.inbox.claim(target, position.turn)
-    const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
-    signal.throwIfAborted()
-    const sections = renderContextSections(assembly)
-    const context = this.runtimeContext.project(joinContextSections(sections), sections)
-    const decision = await this.dispatch.waterfall(
-      'agent/pre-step', { messages: claimed, ...position, signal },
-      (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({
-        kind: 'enter',
-        messages: context === undefined ? claimed : [...claimed, context],
-      }),
-    )
-    signal.throwIfAborted()
-    if (decision.kind === 'reject') return decision
-    return { ...decision, assembly }
+    const batch: ClaimedBatch = { nextStep: claimed.slice(0, claimedSteps), nextTurn: claimed.slice(claimedSteps) }
+    try {
+      const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
+      signal.throwIfAborted()
+      const sections = renderContextSections(assembly)
+      const context = this.runtimeContext.project(joinContextSections(sections), sections)
+      const decision = await this.dispatch.waterfall(
+        'agent/pre-step', { messages: claimed, ...position, signal },
+        (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({
+          kind: 'enter',
+          messages: context === undefined ? claimed : [...claimed, context],
+        }),
+      )
+      signal.throwIfAborted()
+      if (decision.kind === 'reject') return decision
+      return { ...decision, assembly, claimed: batch }
+    } catch (error: unknown) {
+      this.requeueClaimed(batch, signal, error)
+    }
+  }
+
+  /**
+   * Return the person-typed messages (`source.kind: 'user'`) of a claimed
+   * batch that never reached the session log to the head of the pending lists
+   * they came from, then rethrow the step failure. The next waking input
+   * claims them again, so the person's message is neither lost nor logged
+   * twice. Plugin-produced input (goal rounds, notices) and every message of a
+   * subagent session keep failing closed: they are dropped with the step, as
+   * before, so a child's settlement never waits on a prompt nobody will send
+   * again. Cancellation keeps its own inbox outcome and requeues nothing; a
+   * message a listener already put back stays where it is.
+   * @param batch - the messages this step boundary claimed.
+   * @param signal - the running turn's cancellation signal.
+   * @param error - the failure that ended the step before admission.
+   */
+  private requeueClaimed(batch: ClaimedBatch, signal: AbortSignal, error: unknown): never {
+    if (abortedCancelCause(signal) !== undefined || this.session.header.origin === 'subagent') throw error
+    try {
+      const pending = new Set([...this.inbox.nextStep, ...this.inbox.nextTurn].map(message => message.id))
+      const returned = (messages: readonly UserMessage[]): UserMessage[] =>
+        messages.filter(message => message.source.kind === 'user' && !pending.has(message.id))
+      this.inbox.splice('next-step', 0, 0, returned(batch.nextStep))
+      this.inbox.splice('next-turn', 0, 0, returned(batch.nextTurn))
+    } catch (requeueError: unknown) {
+      throw new AggregateError(
+        [error, requeueError],
+        'Step failed before admitting its claimed input, and the input could not be returned to the inbox',
+        { cause: error },
+      )
+    }
+    throw error
   }
 
   /** Whether the assembled tool schemas differ from the logged request header's. */
@@ -405,7 +450,15 @@ export class ReactLoopAgent implements Agent {
     const renderedPrompt = renderPrompt(assembly)
     let firstAttempt = true
     while (true) {
-      const { config, preparedCall } = await this.prepareRequest(turn, step, signal)
+      let prepared: { config: LlmCallConfig; preparedCall?: PreparedLlmCall }
+      try {
+        prepared = await this.prepareRequest(turn, step, signal)
+      } catch (error: unknown) {
+        // The first attempt admits the claimed users only after its request is prepared.
+        if (firstAttempt) this.requeueClaimed(decision.claimed, signal, error)
+        throw error
+      }
+      const { config, preparedCall } = prepared
       const startsRequestSeries = firstAttempt && decision.startsRequestSeries === true
       const commits = this.systemPrompt.project(renderedPrompt, {
         inHistory: preparedCall?.systemPromptUpdate === 'in-history',

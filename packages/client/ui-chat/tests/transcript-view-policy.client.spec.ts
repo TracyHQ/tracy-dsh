@@ -5,7 +5,7 @@ import type { ChatSettings } from '../src/chat-settings.ts'
 import { TranscriptViewPolicy } from '../src/client/transcript-view.ts'
 
 describe('TranscriptViewPolicy', () => {
-  it('defaults to Detailed and publishes explicit choices before persistence settles', () => {
+  it('uses the client default and publishes explicit choices before persistence settles', () => {
     const host = stubConfigForm<ChatSettings>()
     const observed: string[] = []
     let current = (): string => 'unconstructed'
@@ -19,14 +19,14 @@ describe('TranscriptViewPolicy', () => {
     const policy = new TranscriptViewPolicy(scope)
     current = () => policy.mode.getSnapshot()
 
-    expect(policy.mode.getSnapshot()).toBe('detailed')
+    expect(policy.mode.getSnapshot()).toBe('compact')
     policy.setMode('standard')
     expect(policy.mode.getSnapshot()).toBe('standard')
     expect(observed).toEqual(['transcriptView=standard:standard'])
     expect(host.set).toHaveBeenCalledWith('transcriptView', 'standard')
   })
 
-  it.each(['standard', 'detailed'] as const)('uses %s for missing preferences without writing a default', (defaultMode) => {
+  it.each(['compact', 'standard', 'detailed'] as const)('uses %s for missing preferences without writing a default', (defaultMode) => {
     const host = stubConfigForm<ChatSettings>()
     const policy = new TranscriptViewPolicy(host.scope, defaultMode)
     expect(policy.mode.getSnapshot()).toBe(defaultMode)

@@ -187,17 +187,17 @@ describe('ui-message-feedback browser plugin', () => {
     const decoration = b.decorations.get('feedback')
     if (decoration?.ui.kind !== 'action') throw new Error('the /feedback decoration is not an action')
     decoration.ui.run({ sessionId: sid('s1') })
-    dialog.edit({ category: 'service-stability', text: 'timed out' })
+    dialog.edit({ categories: ['desktop-app', 'web-app'], text: 'timed out' })
     await dialog.submit()
     expect(b.calls.filter(call => call.method === 'record')[0]?.request)
-      .toEqual({ sessionId: 's1', text: 'timed out', category: 'service-stability' })
+      .toEqual({ sessionId: 's1', text: 'timed out', categories: ['desktop-app', 'web-app'] })
     expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: null, toast: 1 })
 
     message.openDialog(MSG, 'positive')
-    dialog.edit({ category: 'task-result' })
+    dialog.edit({ categories: ['product-feature'] })
     await dialog.submit()
     expect(b.calls.filter(call => call.method === 'put')[0]?.request).toMatchObject({
-      sessionId: 's1', messageId: MSG, rating: 'positive', category: 'task-result', ifVersion: 'v1',
+      sessionId: 's1', messageId: MSG, rating: 'positive', categories: ['product-feature'], ifVersion: 'v1',
     })
     expect(dialog.hooks.dialog.getSnapshot().toast).toBe(2)
     dialog.dismissToast(2)

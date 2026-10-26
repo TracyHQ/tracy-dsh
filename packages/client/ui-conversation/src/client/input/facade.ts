@@ -140,6 +140,8 @@ export class SessionInputShell implements SessionInput {
     return this.draftEditor.projection
   }
   private rev = 0
+  /** Published as `InputState.sent`: sends committed plus command tokens consumed. */
+  private sentCount = 0
   private readonly unregister: () => void
   private noticeSeq = 0
   private lastMirroredDraft = ''
@@ -443,14 +445,29 @@ export class SessionInputShell implements SessionInput {
   /**
    * Consume one command token after business success (scoped consume-token
    * event listener body). Span guard: revision CAS then splice; bare-token
-   * guard: trimmed-draft equality then clear.
+   * and line guards: trimmed-draft equality then clear.
    * @param guard - exact span or bare-token guard.
    * @returns whether the token was consumed.
    */
   consumeToken(guard: ConsumeTokenRequest['guard']): boolean {
+    const consumed = this.consumeGuarded(guard)
+    // A consumed token is a command the person ran (`InputState.sent`).
+    if (consumed) {
+      this.sentCount += 1
+      this.publish()
+    }
+    return consumed
+  }
+
+  private consumeGuarded(guard: ConsumeTokenRequest['guard']): boolean {
     if (guard.kind === 'span') {
       if (guard.span.draftRev !== this.rev || guard.span.start === guard.span.end) return false
       return this.draftEditor.replaceText(guard.span, '')
+    }
+    if (guard.kind === 'line') {
+      if (guard.line === '' || this.projection.clipboardText.trim() !== guard.line) return false
+      this.setDraft('')
+      return true
     }
     if (guard.token === '' || this.projection.clipboardText.trim() !== guard.token) return false
     this.setDraft('')
@@ -628,6 +645,9 @@ export class SessionInputShell implements SessionInput {
    * undo history so sent content cannot resurrect.
    */
   private commitDraft(retainSuffixOf: string | null): void {
+    // Every commit-draft is a send that went out (default send, claimed command, attachment-only send);
+    // run() publishes after its effects.
+    this.sentCount += 1
     this.draftEditor.clearCommittedDraft((clip) => {
       if (retainSuffixOf !== null && clip !== retainSuffixOf && clip.startsWith(retainSuffixOf)) {
         return retainSuffixOf.length
@@ -846,6 +866,7 @@ export class SessionInputShell implements SessionInput {
       ...(core.claim !== undefined ? { claim: core.claim } : {}),
       occurrences: this.projection.occurrences,
       queue: this.deps.inbox?.getSnapshot()?.['next-turn'] ?? EMPTY_QUEUE,
+      sent: this.sentCount,
     }
   }
 

@@ -190,10 +190,33 @@ export class ClientRemoteEvents {
   ): Promise<void> {
     const adapter = this.ownerCtx.typert.contexts.getClient('agent')
     let resolved: Context | TypertOwnedValue<Context> | undefined
+    let resolveFailed = false
     try {
       resolved = adapter?.resolve(frame.agentId)
     } catch (error) {
+      resolveFailed = true
       this.reportError(frame.event, error)
+    }
+    // A frame the Host re-delivers after a reload lands before this page has
+    // materialized the session's Agent Context: `resolve` says "not here" only
+    // because the Context does not exist *yet*. Delegating at that moment tells
+    // the Host no Client will ever answer, and a question the user was about to
+    // see is dropped. So with an adapter in place, wait for the Context to
+    // appear; the delivery lifetime (Host cancel, generation end) bounds the
+    // wait, and a wait that ends there answers nothing — the Host still holds
+    // the event for the next Client. No adapter at all keeps the immediate
+    // delegation: that Client has no session surface to wait for.
+    if (resolved === undefined && adapter !== undefined && !resolveFailed) {
+      resolved = await waitForAgentContext(
+        () => adapter.resolve(frame.agentId),
+        signal,
+        (error) => { this.reportError(frame.event, error) },
+      )
+      if (signal.aborted) {
+        // The wait ended with the delivery; a Context it did resolve is not dispatched, so let it go.
+        if (isTypertOwnedValue(resolved)) resolved[Symbol.dispose]()
+        return
+      }
     }
     const owned = isTypertOwnedValue(resolved) ? resolved : undefined
     try {
@@ -330,6 +353,46 @@ function validRemoteEventName(value: unknown): value is string {
 
 function invalidRemoteEventFrame(): never {
   throw new TypeError('client api: invalid forwarded Remote event frame')
+}
+
+/** How often a waiting delivery re-asks the adapter for its Agent Context. */
+const AGENT_CONTEXT_POLL_MS = 250
+
+/**
+ * Wait until the Client has materialized the Agent Context a delivery is
+ * addressed to, or until the delivery lifetime ends.
+ * @param resolve - the adapter lookup, re-run each poll.
+ * @param signal - delivery lifetime; aborted → `undefined` without a reply.
+ * @param report - where a throwing lookup is reported; the wait then stops.
+ * @returns the Context once present, `undefined` when the wait ended first.
+ */
+async function waitForAgentContext<T>(
+  resolve: () => T | undefined,
+  signal: AbortSignal,
+  report: (error: unknown) => void,
+): Promise<T | undefined> {
+  while (!signal.aborted) {
+    await new Promise<void>((done) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort)
+        done()
+      }, AGENT_CONTEXT_POLL_MS)
+      const onAbort = (): void => {
+        clearTimeout(timer)
+        done()
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    if (signal.aborted) return undefined
+    try {
+      const target = resolve()
+      if (target !== undefined) return target
+    } catch (error) {
+      report(error)
+      return undefined
+    }
+  }
+  return undefined
 }
 
 function privateEvents(ctx: Context): PrivateEventContext {

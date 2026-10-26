@@ -181,7 +181,7 @@ describe('MessageFeedbackService public contract', () => {
     expect(Object.isFrozen(listed.value.items[0])).toBe(true)
   })
 
-  it('stores a category with the judgment, treats a category change as material, and validates stored categories', async () => {
+  it('stores multiple categories with the judgment, treats category changes as material, and validates stored categories', async () => {
     const { ctx, persistence } = await harness()
     const fixture = messageFixture('categories')
     persistence.persist(fixture.session)
@@ -192,33 +192,33 @@ describe('MessageFeedbackService public contract', () => {
       messageId,
       rating: 'negative',
       note: 'wrong file',
-      category: 'task-result',
+      categories: ['general', 'product-feature'],
       ifVersion: null,
     }))
-    expect(created).toMatchObject({ rating: 'negative', note: 'wrong file', category: 'task-result' })
+    expect(created).toMatchObject({ rating: 'negative', note: 'wrong file', categories: ['general', 'product-feature'] })
 
-    // The same value is a no-op; a different category is a material edit;
-    // omitting the category drops it.
+    // The same values are a no-op; a different set is a material edit;
+    // omitting categories drops them.
     const same = expectItem(await ctx.messageFeedback.put({
-      sessionId: fixture.session.id, messageId, rating: 'negative', note: 'wrong file', category: 'task-result',
+      sessionId: fixture.session.id, messageId, rating: 'negative', note: 'wrong file', categories: ['general', 'product-feature'],
       ifVersion: created.version,
     }))
     expect(same).toEqual(created)
     const recategorized = expectItem(await ctx.messageFeedback.put({
-      sessionId: fixture.session.id, messageId, rating: 'negative', note: 'wrong file', category: 'other',
+      sessionId: fixture.session.id, messageId, rating: 'negative', note: 'wrong file', categories: ['other'],
       ifVersion: created.version,
     }))
     expect(recategorized.version).not.toBe(created.version)
-    expect(recategorized.category).toBe('other')
+    expect(recategorized.categories).toEqual(['other'])
     const dropped = expectItem(await ctx.messageFeedback.put({
       sessionId: fixture.session.id, messageId, rating: 'negative', ifVersion: recategorized.version,
     }))
-    expect(dropped).not.toHaveProperty('category')
+    expect(dropped).not.toHaveProperty('categories')
     expect(dropped).not.toHaveProperty('note')
     const events = (persistence.durable.get(fixture.session.id)?.events ?? [])
       .filter(event => event.type === 'feedback/message-put')
-      .map(event => event.data.item.category)
-    expect(events).toEqual(['task-result', 'other', undefined])
+      .map(event => event.data.item.categories)
+    expect(events).toEqual([['general', 'product-feature'], ['other'], undefined])
 
     // A stored payload outside the fixed taxonomy is refused on read.
     const corrupt = messageFixture('corrupt-category')
@@ -227,7 +227,7 @@ describe('MessageFeedbackService public contract', () => {
       item: {
         messageId: corrupt.assistantMessageIds[0],
         rating: 'negative',
-        category: 'not-a-category' as never,
+        categories: ['not-a-category'] as never,
         version: staleVersion(),
         createdAt: 1,
         updatedAt: 1,

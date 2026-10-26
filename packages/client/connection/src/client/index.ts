@@ -35,6 +35,7 @@ export {
   RpcId,
   transportError,
 } from './api.ts'
+export { dshUrl, pageBase } from './page-base.ts'
 
 // Connection loop types are public through ConnectionHandle.start; the
 // controller remains package-internal.

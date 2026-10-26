@@ -22,7 +22,7 @@ describe('FeedbackDialogController', () => {
     const { controller } = bench()
 
     expect(controller.state.getSnapshot()).toEqual({
-      target: null, category: null, text: '', submitting: false, failure: null, toast: 0,
+      target: null, categories: [], text: '', submitting: false, failure: null, toast: 0,
     })
   })
 
@@ -30,43 +30,43 @@ describe('FeedbackDialogController', () => {
     const { controller } = bench()
 
     controller.open({ kind: 'session' })
-    controller.edit({ category: 'task-result' })
+    controller.edit({ categories: ['general'] })
     controller.edit({ text: 'slow' })
     expect(controller.state.getSnapshot()).toMatchObject({
-      target: { kind: 'session' }, category: 'task-result', text: 'slow',
+      target: { kind: 'session' }, categories: ['general'], text: 'slow',
     })
 
     controller.dismiss()
     controller.open(MESSAGE_TARGET)
     expect(controller.state.getSnapshot()).toMatchObject({
-      target: MESSAGE_TARGET, category: null, text: '',
+      target: MESSAGE_TARGET, categories: [], text: '',
     })
   })
 
   it('ignores draft edits and submits while closed', async () => {
     const { controller, submit } = bench()
 
-    controller.edit({ category: 'other' })
+    controller.edit({ categories: ['other'] })
     controller.edit({ text: 'x' })
     await controller.submitDraft()
 
-    expect(controller.state.getSnapshot()).toMatchObject({ category: null, text: '', toast: 0 })
+    expect(controller.state.getSnapshot()).toMatchObject({ categories: [], text: '', toast: 0 })
     expect(submit).not.toHaveBeenCalled()
   })
 
-  it('submits the Session target with the trimmed text and the category', async () => {
+  it('submits the Session target with the trimmed text and multiple categories', async () => {
     const { controller, submit } = bench()
     controller.open({ kind: 'session' })
-    controller.edit({ category: 'service-stability' })
+    controller.edit({ categories: ['desktop-app', 'web-app'] })
     controller.edit({ text: '  timed out twice  ' })
 
     await controller.submitDraft()
 
-    expect(submit).toHaveBeenCalledWith({ kind: 'session' }, { text: 'timed out twice', category: 'service-stability' })
+    expect(submit).toHaveBeenCalledWith({ kind: 'session' }, { text: 'timed out twice', categories: ['desktop-app', 'web-app'] })
     expect(controller.state.getSnapshot()).toMatchObject({ target: null, toast: 1 })
   })
 
-  it('submits an empty draft as an entry with neither text nor category', async () => {
+  it('submits an empty draft as an entry with neither text nor categories', async () => {
     const { controller, submit } = bench()
     controller.open({ kind: 'session' })
     controller.edit({ text: '   ' })
@@ -79,12 +79,12 @@ describe('FeedbackDialogController', () => {
   it('submits the message target with the entry', async () => {
     const { controller, submit } = bench()
     controller.open(MESSAGE_TARGET)
-    controller.edit({ category: 'task-result' })
+    controller.edit({ categories: ['product-feature', 'other'] })
     controller.edit({ text: 'wrong file' })
 
     await controller.submitDraft()
 
-    expect(submit).toHaveBeenCalledWith(MESSAGE_TARGET, { text: 'wrong file', category: 'task-result' })
+    expect(submit).toHaveBeenCalledWith(MESSAGE_TARGET, { text: 'wrong file', categories: ['product-feature', 'other'] })
     expect(controller.state.getSnapshot()).toMatchObject({ target: null, toast: 1 })
   })
 
@@ -120,9 +120,9 @@ describe('FeedbackDialogController', () => {
 
     const first = controller.submitDraft()
     controller.edit({ text: 'second' })
-    controller.edit({ category: 'other' })
+    controller.edit({ categories: ['other'] })
     await controller.submitDraft()
-    expect(controller.state.getSnapshot()).toMatchObject({ submitting: true, text: 'first', category: null })
+    expect(controller.state.getSnapshot()).toMatchObject({ submitting: true, text: 'first', categories: [] })
 
     release()
     await first
@@ -190,7 +190,7 @@ describe('FeedbackDialogController', () => {
     controller.open({ kind: 'session' })
     controller.dispose()
     expect(controller.state.getSnapshot()).toEqual({
-      target: null, category: null, text: '', submitting: false, failure: null, toast: 0,
+      target: null, categories: [], text: '', submitting: false, failure: null, toast: 0,
     })
   })
 })

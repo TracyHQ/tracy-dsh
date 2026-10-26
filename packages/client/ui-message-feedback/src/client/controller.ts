@@ -152,10 +152,10 @@ export class MessageFeedbackController implements HostObservable<MessageFeedback
   /**
    * Create or replace feedback for one message, comparing against the version
    * this controller last observed. The item stores exactly `entry`: an entry
-   * without a note or category replaces whatever the stored item carried.
+   * without a note or categories replaces whatever the stored item carried.
    * @param messageId - target assistant message.
    * @param rating - desired judgment.
-   * @param entry - explanation and category to store with the judgment.
+   * @param entry - explanation and selected categories to store with the judgment.
    * @returns the settled mutation result.
    */
   rate(
@@ -198,7 +198,7 @@ export class MessageFeedbackController implements HostObservable<MessageFeedback
       messageId,
       rating,
       ...(entry.text === undefined ? {} : { note: entry.text }),
-      ...(entry.category === undefined ? {} : { category: entry.category }),
+      ...(entry.categories === undefined ? {} : { categories: [...entry.categories] }),
       ifVersion: observed?.version ?? null,
     })
     if (!carried.ok) return carrierFailure(carried.error)

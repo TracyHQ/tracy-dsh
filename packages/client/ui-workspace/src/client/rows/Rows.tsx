@@ -3,7 +3,9 @@
  * all data and callbacks arrive via props. Hover swaps (folder->chevron,
  * time->ellipsis, action buttons) are CSS-only, and a session row's clipped
  * title marquees programmatically while the row is hovered. Workspace row
- * menus are visual-only except Rename/Delete. A Session row's "..." menu and
+ * menus are visual-only except Rename/Delete. A Workspace row's "..." menu
+ * (Tracy) is the `sidebar.workspaces.workspace.menu.item` list whose shipped
+ * entries render the Rename/Delete rows this module builds. A Session row's "..." menu and
  * its hover buttons are the `sidebar.workspaces.session.menu.item` and
  * `sidebar.workspaces.session.row.action` lists, rendered through the
  * browser's `renderSlot` with the menu's open state as the occurrence's hook
@@ -11,19 +13,19 @@
  * session and workspace hover cards are suppressed while a menu is open.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { RefObject } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import clsx from 'clsx'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   HoverCard, IconArchiveOutlineRegular, IconEditOutlineRegular,
   IconEllipsisOutlineRegular, IconFolderCloseRegular, IconFolderOpenRegular,
   IconNewChatOutlineRegular, IconPinFillRegular, IconTrashOutlineRegular,
-  IconTriangleRightFillRegular, IconUnarchiveOutlineRegular, Menu, relativeTime, StateDot, Tooltip,
+  IconTriangleRightFillRegular, IconUnarchiveOutlineRegular, Menu, MenuItemButton, relativeTime, StateDot, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ShortcutCatalogEntry } from '@deepseek-ai/dsh-client-shortcuts/client'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import { abbreviateHomePath } from '@deepseek-ai/dsh-util-workspace-path'
-import type { MenuOpenState, WorkspaceBrowserProps } from '../contract/slots.ts'
+import type { MenuOpenState, WorkspaceBrowserProps, WorkspaceRowMenuOwnerProps } from '../contract/slots.ts'
 import type { GroupNode, SearchResultNode, SessionNode } from '../tree.ts'
 import css from './Rows.module.css'
 
@@ -216,7 +218,7 @@ function rowHalf(e: { clientY: number; currentTarget: HTMLElement }): 'before' |
  * @param props.t - the browser root's locale seat.
  * @returns the row element.
  */
-export function ProjectRowItem({ group, containsCurrentDescendant = false, onToggle, onCreate, actions, drag, home, newShortcut, t }: {
+export function ProjectRowItem({ group, containsCurrentDescendant = false, onToggle, onCreate, actions, renderMenu, drag, home, newShortcut, t }: {
   group: GroupNode
   newShortcut?: ShortcutCatalogEntry | undefined
   containsCurrentDescendant?: boolean
@@ -224,6 +226,11 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
   onCreate: () => void
   /** Real-Workspace actions; absent for the ungrouped bucket (no menu shown). */
   actions?: { rename: () => void; delete: () => void } | undefined
+  /**
+   * Tracy: render the menu rows (the browser's `sidebar.workspaces.workspace.menu.item`
+   * dispatch). Absent, the menu shows the shipped Rename and Delete rows.
+   */
+  renderMenu?: ((owner: WorkspaceRowMenuOwnerProps, menuOpenState: MenuOpenState) => ReactNode) | undefined
   /** Present only for real Workspace rows in the grouped view. */
   drag?: WorkspaceRowDragProps | undefined
   /** Host account home; POSIX home-rooted hover paths display as `~`. */
@@ -235,10 +242,24 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
   const label = row.workspaceId === undefined ? t('group.ungrouped') : row.label
   const active = containsCurrentDescendant || (group.expanded && group.containsCurrent)
   const [menuOpen, setMenuOpen] = useState(false)
-  const workspaceMenuItems = [
-    { id: 'rename', label: t('rename'), icon: <IconEditOutlineRegular /> },
-    { id: 'delete', label: t('delete.workspace'), icon: <IconTrashOutlineRegular />, danger: true },
-  ]
+  // The menu's open state, bound into the row entries' `useMenuOpenState` hook.
+  const menuOpenState = useMemo((): MenuOpenState => [menuOpen, setMenuOpen], [menuOpen])
+  // The shipped rows, built here because the dialogs they open belong to the
+  // browser; the shipped slot entries render them by id.
+  const shipped = actions === undefined
+    ? undefined
+    : {
+      rename: (
+        <MenuItemButton icon={<IconEditOutlineRegular />} onSelect={() => { setMenuOpen(false); actions.rename() }}>
+          {t('rename')}
+        </MenuItemButton>
+      ),
+      delete: (
+        <MenuItemButton icon={<IconTrashOutlineRegular />} danger onSelect={() => { setMenuOpen(false); actions.delete() }}>
+          {t('delete.workspace')}
+        </MenuItemButton>
+      ),
+    }
   const ownRow = (
     <div
       className={clsx(css.projectRow, menuOpen && css.menuOpen)}
@@ -266,20 +287,10 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
         <span className={css.title}>{label}</span>
       </span>
       <span className={css.rowActions}>
-        {actions !== undefined && (
+        {shipped !== undefined && (
           <Menu
             open={menuOpen}
             onClose={() => { setMenuOpen(false) }}
-            items={workspaceMenuItems}
-            onSelect={(id) => {
-              setMenuOpen(false)
-              // Unknown ids leave before the dispatch: a future menu row must
-              // not inherit the destructive branch as an else fallback.
-              /* v8 ignore next -- Menu can emit only the rename and delete rows supplied above. */
-              if (id !== 'rename' && id !== 'delete') return
-              if (id === 'rename') actions.rename()
-              else actions.delete()
-            }}
             portal
             closeOnPointerLeave
             anchor={(
@@ -292,7 +303,14 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
                 <IconEllipsisOutlineRegular />
               </button>
             )}
-          />
+          >
+            {renderMenu === undefined || row.workspaceId === undefined
+              ? <>{shipped.rename}{shipped.delete}</>
+              : renderMenu(
+                { workspaceId: row.workspaceId, path: row.cwd ?? '', title: label, shipped, MenuItem: MenuItemButton },
+                menuOpenState,
+              )}
+          </Menu>
         )}
         <Tooltip label={t('actions.newSession')} shortcutKeys={newShortcut?.keys} side="bottom" align="end" delayMs={500}>
           <button

@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-web-frontend",
   "description": "Web application entry: vite build over the @deepseek-ai/dsh-client-web shell library; dist/ served by apps/cli's dsh web",
-  "version": "0.2.0-rc.2",
+  "version": "0.2.0-rc.2-tracy.49",
   "publishConfig": {
     "access": "public"
   },
@@ -58,7 +58,7 @@
     "react-dom": "^18.2.0",
     "typescript": "^6.0.3",
     "vite": "^6.0.0",
-    "vitest": "^4.1.8",
+    "vitest": "^4.1.11",
     "ws": "8.21.0",
     "@deepseek-ai/dsh-client-ui-theme": "workspace:*",
     "@deepseek-ai/dsh-launch-environment": "workspace:*",

@@ -4,7 +4,21 @@ import { bindingKey, effectiveShortcuts, presentBinding, parseShortcutDefinition
 import type { NormalizedBinding, ShortcutConfigSnapshot, ShortcutDefinition, ShortcutPlatform, ShortcutRevision } from '@deepseek-ai/dsh-client-shortcuts/protocol'
 import type { DesktopBrowserLeaseId } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
 import { desktopKeybindings } from './keybindings.ts'
-import { DESKTOP_IPC, assertDesktopSender } from './ipc.ts'
+import { DESKTOP_IPC, SCHEME } from './ipc.ts'
+
+/**
+ * The Desktop application document, the only product page this application serves.
+ * @param url - top-frame document URL.
+ * @returns whether the URL is `dsh-app://app/…`.
+ */
+export function isApplicationDocument(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === `${SCHEME}:` && parsed.hostname === 'app'
+  } catch {
+    return false
+  }
+}
 
 /**
  * Install application-owned configuration handlers and attach each product window's input lifecycle.
@@ -13,11 +27,19 @@ import { DESKTOP_IPC, assertDesktopSender } from './ipc.ts'
  * @param platform - local device platform.
  * @param updateMenu - rebuild the application menu when the close accelerator or availability changes.
  * @param overlayInput - Current shell-owned input blocking state for the product window.
+ * @param trusted - whether a top-frame document URL is the product page; an embedder that serves the product from
+ *   its own origin passes that origin's test. Defaults to the Desktop application document.
+ * @param products - every product window (Tracy fork, TRACY-FORK.md): an embedder with several windows passes its
+ *   registry; each window's page registers its own shortcuts and is answered by `event.sender`, the configuration file
+ *   stays shared and every window hears a change, and keys/menus go to `getWindow()` (the focused one). Defaults to
+ *   the one window `getWindow()` returns, which is the Desktop application's behaviour.
  * @returns menu construction, editor key delivery, window attachment, and teardown operations.
  */
 export function installDesktopShortcuts(
   getWindow: () => BrowserWindow | undefined, userData: string, platform: ShortcutPlatform, updateMenu: () => void,
   overlayInput: (window: BrowserWindow) => { readonly revision: number; readonly blocked: boolean },
+  trusted: (url: string) => boolean = isApplicationDocument,
+  products: () => Iterable<BrowserWindow> = () => { const window = getWindow(); return window === undefined ? [] : [window] },
 ): {
   fileMenu(labels: { fileMenu: string; closePage: string }): MenuItemConstructorOptions
   /**
@@ -37,50 +59,86 @@ export function installDesktopShortcuts(
   attachGuest(window: BrowserWindow, guest: WebContents, name: DesktopBrowserLeaseId): () => void
   dispose(): void
 } {
-  let definitions: readonly ShortcutDefinition[] = []
-  let recording = false
-  let revision: ShortcutRevision | undefined
-  let closeBinding: NormalizedBinding | null = null
+  /** One product page's registration: its catalog, recording state, and the bindings indexed from it. */
+  interface PageShortcuts {
+    definitions: readonly ShortcutDefinition[]
+    recording: boolean
+    keys: Set<string>
+    closeBinding: NormalizedBinding | null
+  }
+  // Tracy fork: per product page (keyed by the window's top contents), so one window's reload or recording
+  // leaves the others alone. The accepted configuration and its revision stay one, shared by every page.
+  const pages = new Map<WebContents, PageShortcuts>()
+  let snapshot: ShortcutConfigSnapshot | undefined
   let editingInput: BrowserWindow['webContents'] | undefined
   const scopedDesktop = platform === 'windows' || platform === 'macos'
   const disposers = new Set<() => void>()
   const guestInputs = new Map<WebContents, { window: BrowserWindow; reset(): void }>()
-  const closeAccelerator = (): string | undefined => presentBinding(closeBinding, platform).aria
+  const pageOf = (window: BrowserWindow | undefined): PageShortcuts | undefined =>
+    window === undefined || window.isDestroyed() ? undefined : pages.get(window.webContents)
+  /** The revision a page's input carries: none until it registered and the configuration loaded. */
+  const revisionOf = (page: PageShortcuts | undefined): ShortcutRevision | undefined =>
+    page === undefined || page.definitions.length === 0 || snapshot === undefined || snapshot.status === 'loading'
+      ? undefined : snapshot.revision
+  /** The page the application menu speaks for: the current window's, else any registered one. */
+  const menuPage = (): PageShortcuts | undefined => pageOf(getWindow()) ?? pages.values().next().value
+  const closeAccelerator = (): string | undefined => presentBinding(menuPage()?.closeBinding ?? null, platform).aria
     ?.replace('Meta+', 'Command+').replace(/Arrow(Up|Down|Left|Right)$/u, '$1')
+  const menuState = (): string => `${revisionOf(menuPage()) !== undefined} ${closeAccelerator() ?? ''}`
+  let shownMenu = menuState()
+  const refreshMenu = (): void => {
+    const next = menuState()
+    if (next === shownMenu) return
+    shownMenu = next
+    updateMenu()
+  }
   const sendMenuClose = (): void => {
     const window = getWindow()
+    const page = pageOf(window)
+    const revision = revisionOf(page)
     if (window === undefined || window.isDestroyed() || !window.isFocused() || !window.isEnabled()
-      || revision === undefined || recording || overlayInput(window).blocked) return
+      || revision === undefined || page?.recording === true || overlayInput(window).blocked) return
     window.webContents.send(DESKTOP_IPC.shortcutsInput, { kind: 'menu', commandId: 'page.close', revision })
   }
-  let keys = new Set<string>()
-  const publish = (snapshot: ShortcutConfigSnapshot): void => {
-    const wasEnabled = revision !== undefined
-    const previousAccelerator = closeAccelerator()
-    revision = definitions.length === 0 || snapshot.status === 'loading' ? undefined : snapshot.revision
-    const rows = snapshot.status === 'loading' ? [] : effectiveShortcuts(definitions, snapshot.document, 'desktop', platform)
-    keys = new Set(rows.flatMap(row => row.binding !== null && row.issue === null && row.conflicts.length === 0
+  /** Rebuild one page's binding index from the accepted configuration. */
+  const index = (page: PageShortcuts): void => {
+    const rows = snapshot === undefined || snapshot.status === 'loading' ? []
+      : effectiveShortcuts(page.definitions, snapshot.document, 'desktop', platform)
+    page.keys = new Set(rows.flatMap(row => row.binding !== null && row.issue === null && row.conflicts.length === 0
       ? [bindingKey(row.binding)] : []))
     const close = rows.find(row => row.id === 'page.close')
-    closeBinding = close?.issue === null && close.conflicts.length === 0 ? close.binding : null
-    if (wasEnabled !== (revision !== undefined) || previousAccelerator !== closeAccelerator()) updateMenu()
-    const window = getWindow()
-    if (window !== undefined && !window.isDestroyed() && window.webContents.mainFrame.url.startsWith('dsh-app://app/')) {
-      window.webContents.send(DESKTOP_IPC.shortcutsChanged, snapshot)
+    page.closeBinding = close?.issue === null && close.conflicts.length === 0 ? close.binding : null
+  }
+  const publish = (next: ShortcutConfigSnapshot): void => {
+    snapshot = next
+    for (const page of pages.values()) index(page)
+    refreshMenu()
+    for (const window of products()) {
+      if (!window.isDestroyed() && trusted(window.webContents.mainFrame.url)) {
+        window.webContents.send(DESKTOP_IPC.shortcutsChanged, next)
+      }
     }
   }
   const persistence = desktopKeybindings(userData, platform, publish)
+  /** The catalog the shared configuration validates edits against: every registered page's commands. */
+  const catalog = (): readonly ShortcutDefinition[] | null => {
+    const byId = new Map<string, ShortcutDefinition>()
+    for (const page of pages.values()) for (const row of page.definitions) if (!byId.has(row.id)) byId.set(row.id, row)
+    return pages.size === 0 ? null : [...byId.values()]
+  }
   const assertSender = (event: IpcMainInvokeEvent): BrowserWindow => {
-    const window = getWindow()
-    if (window === undefined || window.isDestroyed() || event.sender !== window.webContents
-      || event.senderFrame !== window.webContents.mainFrame) throw new Error('desktop shortcuts: rejected sender')
-    assertDesktopSender(event, ['app'])
+    const window = [...products()].find(candidate => !candidate.isDestroyed() && event.sender === candidate.webContents)
+    if (window === undefined || event.senderFrame !== window.webContents.mainFrame) throw new Error('desktop shortcuts: rejected sender')
+    if (!trusted(window.webContents.mainFrame.url)) throw new Error('dsh desktop: rejected IPC from an unowned renderer')
     return window
   }
   ipcMain.handle(DESKTOP_IPC.shortcutsGet, async (event, input: unknown) => {
-    assertSender(event)
-    definitions = parseShortcutDefinitions(input)
-    persistence.setDefinitions(definitions)
+    const window = assertSender(event)
+    const definitions = parseShortcutDefinitions(input)
+    const page = pages.get(window.webContents) ?? { definitions, recording: false, keys: new Set<string>(), closeBinding: null }
+    page.definitions = definitions
+    pages.set(window.webContents, page)
+    persistence.setDefinitions(catalog())
     return persistence.readCurrent()
   })
   ipcMain.handle(DESKTOP_IPC.shortcutsEdit, async (event, input: unknown, expectedRevision: unknown) => {
@@ -91,12 +149,15 @@ export function installDesktopShortcuts(
   ipcMain.handle(DESKTOP_IPC.shortcutsRecording, (event, active: unknown) => {
     const window = assertSender(event)
     if (typeof active !== 'boolean') throw new Error('desktop shortcuts: invalid recording state')
-    recording = active
+    const page = pages.get(window.webContents)
+    if (page !== undefined) page.recording = active
     window.webContents.setIgnoreMenuShortcuts(active)
   })
   ipcMain.handle(DESKTOP_IPC.shortcutsCloseWindow, (event, expected: unknown) => {
     const window = assertSender(event)
-    if (expected !== revision || revision === undefined || recording || !window.isFocused() || !window.isEnabled()
+    const page = pages.get(window.webContents)
+    const revision = revisionOf(page)
+    if (expected !== revision || revision === undefined || page?.recording === true || !window.isFocused() || !window.isEnabled()
       || overlayInput(window).blocked) return
     window.close()
   })
@@ -119,8 +180,10 @@ export function installDesktopShortcuts(
     const clear = (): void => {
       resetInput()
       if (guestName !== undefined) return
-      definitions = []; keys.clear(); recording = false
-      persistence.setDefinitions(null)
+      // Only this window's page: another window's registration and keys stay as they are. Keyed by the
+      // contents captured at attach: after BrowserWindow.destroy() the window's own getter throws.
+      if (!pages.delete(contents)) return
+      persistence.setDefinitions(catalog())
     }
     const navigation = (event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>): void => {
       if (event.isMainFrame && !event.isSameDocument) clear()
@@ -136,7 +199,9 @@ export function installDesktopShortcuts(
         contents.setIgnoreMenuShortcuts(true)
         return
       }
-      if (window !== getWindow() || !window.isFocused() || !window.isEnabled() || revision === undefined
+      const page = pageOf(window)
+      const revision = revisionOf(page)
+      if (page === undefined || window !== getWindow() || !window.isFocused() || !window.isEnabled() || revision === undefined
         || (guestName !== undefined && !contents.isFocused())) {
         contents.setIgnoreMenuShortcuts(false)
         held.clear()
@@ -145,6 +210,7 @@ export function installDesktopShortcuts(
       }
       const modifiers = (['control', 'alt', 'shift', 'meta'] as const).filter(modifier => input[modifier])
       const key = bindingKey({ code: input.code, modifiers })
+      const { keys, closeBinding, recording } = page
       const match = keys.has(key)
       const menuMatch = closeBinding !== null && closeBinding.secondCode === undefined && modifiers.join('+') === closeBinding.modifiers.join('+')
         && input.key.toUpperCase() === (closeBinding.code.startsWith('Key') ? closeBinding.code.slice(3) : input.code === closeBinding.code ? input.key.toUpperCase() : '')
@@ -236,13 +302,13 @@ export function installDesktopShortcuts(
         contents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
       } finally {
         editingInput = previous
-        if (!contents.isDestroyed()) contents.setIgnoreMenuShortcuts(recording)
+        if (!contents.isDestroyed()) contents.setIgnoreMenuShortcuts(pageOf(window)?.recording ?? false)
       }
     },
     fileMenu: (labels) => {
       const accelerator = closeAccelerator()
       return { label: labels.fileMenu, submenu: [{
-        id: 'dsh-page-close', label: labels.closePage, enabled: revision !== undefined,
+        id: 'dsh-page-close', label: labels.closePage, enabled: revisionOf(menuPage()) !== undefined,
         ...accelerator === undefined ? {} : { accelerator },
         click: sendMenuClose,
       }] }

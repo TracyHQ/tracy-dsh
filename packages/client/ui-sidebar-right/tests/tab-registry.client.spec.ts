@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { SidebarRightTabRegistry } from '../src/client/tab-registry.ts'
 import type { SidebarRightTabDefinition } from '../src/client/tab-registry.ts'
-import { defaultSeed } from '../src/client/contract/seed.ts'
+import { defaultSeed, hasDoors } from '../src/client/contract/seed.ts'
 
 /** A type recognizing `patterns`, titled by its kind. */
 function typeFor(
@@ -31,6 +31,19 @@ describe('SidebarRightTabRegistry — recognition', () => {
   it('rejects default-page resolution when the selected kind is not registered', () => {
     expect(() => defaultSeed(new SidebarRightTabRegistry(new Context())))
       .toThrow('default tab kind "guide" is not registered')
+  })
+
+  // A registry with no guide entries has no door to open: the guide it would
+  // fall back to lists nothing. That is the state a product reaches by
+  // disabling every shipped tab type, and the column then has nothing to show.
+  it('has no doors until a type contributes a guide entry', () => {
+    const registry = new SidebarRightTabRegistry(new Context())
+    registry.register(typeFor('guide', ['sidebar://guide']))
+    expect(hasDoors(registry)).toBe(false)
+    registry.register(typeFor('files', ['sidebar://files'], {
+      guide: [{ id: 'open', order: 10, title: () => 'Files' }],
+    }))
+    expect(hasDoors(registry)).toBe(true)
   })
 
   it('matches a pattern containing ":" against the whole address', () => {

@@ -897,6 +897,13 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
 @Remote('prompt') prompt(request: SessionPromptRequest, signal: AbortSignal): Promise<SessionPromptValue>
 
 /**
+ * Wake one idle Agent whose follow-ups `api-session/prompt-hold` held in its queue.
+ * @param sessionId - Session whose held follow-ups are released; a cold Session is resumed.
+ * @returns the number of follow-ups released; 0 while still held, while running, or when none is pending.
+ */
+releaseHeldPrompts(sessionId: SessionId): Promise<number>
+
+/**
  * Read one image proven reachable from the addressed Session log.
  * @param request - Session and attachment identities used for authorization.
  * @returns the durable attachment reference and base64-encoded bytes.
@@ -1156,6 +1163,30 @@ One Agent failed outside a durable turn position.
  * @param message - user-safe failure chain.
  */
 'api-session/error'(sessionId: SessionId, message: string): void
+```
+
+Types: [SessionId](core.zh.md)
+
+Source: [`packages/api/session-controller/src/types.ts`](../../packages/api/session-controller/src/types.ts)
+
+<a id="api-sessionprompt-hold--bail"></a>
+
+#### `api-session/prompt-hold` — bail
+
+Decide whether one user follow-up waits in the durable next-turn queue instead of waking its Agent. Returning `true` holds it: the follow-up stays editable and removable in the queue until `sessionController.releaseHeldPrompts` wakes the Agent. Steering is never held, and a running Agent still claims held follow-ups when its current turn ends.
+
+```ts cordis-catalog
+/**
+ * Decide whether one user follow-up waits in the durable next-turn queue
+ * instead of waking its Agent. Returning `true` holds it: the follow-up
+ * stays editable and removable in the queue until
+ * `sessionController.releaseHeldPrompts` wakes the Agent. Steering is never
+ * held, and a running Agent still claims held follow-ups when its current
+ * turn ends.
+ * @mode bail
+ * @param sessionId - Session receiving the follow-up.
+ */
+'api-session/prompt-hold'(sessionId: SessionId): boolean | undefined
 ```
 
 Types: [SessionId](core.zh.md)

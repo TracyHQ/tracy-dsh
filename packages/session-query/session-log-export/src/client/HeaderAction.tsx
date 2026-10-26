@@ -53,6 +53,8 @@ export function SessionLogDownloadHeaderAction(props: SessionLogDownloadHeaderPr
           <Button
             size="sm"
             className={css.moreButton}
+            // Tracy: marks the trigger so a host can hide the whole menu.
+            data-session-menu=""
             aria-label={t('header.more')}
             aria-haspopup="menu"
             aria-expanded={open}

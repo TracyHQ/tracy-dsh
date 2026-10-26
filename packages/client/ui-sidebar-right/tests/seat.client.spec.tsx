@@ -175,6 +175,82 @@ function element(container: HTMLElement, selector: string): HTMLElement {
 }
 
 describe('RightbarSeat presentation', () => {
+  it('offers an add menu on the empty strip only when + is clicked, and preserves unlisted page navigation', async () => {
+    const h = await mountSeat(1440, true, 2)
+    act(() => {
+      h.runtime.ctx.sidebarRightTabs.register({ id: 'test/add', kind: 'add', title: () => 'Add site', guide: [{ id: 'add', order: 0, title: () => 'Add site' }] })
+      h.controller.registerLauncher({ kinds: ['add'], label: 'Open a tab', emptyLabel: 'Click + to start' })
+      h.actions.setExpanded(SESSION, true)
+    })
+    expect(h.view.container.textContent).toContain('Click + to start')
+    expect(h.view.container.querySelector('[role="tab"]')).toBeNull()
+    // The empty pane only invites a click; the menu never opens by itself.
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+    fireEvent.click(element(h.view.container, '[data-sidebar-right-launcher]'))
+    expect([...document.querySelectorAll('[role="menuitem"]')].map(item => item.textContent)).toEqual(['Add site'])
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(document.querySelector('[role="menuitem"]')).toBeNull()
+    const tab = h.open('direct.txt')
+    expect(h.view.container.querySelector(`[data-tab-body="${tab.id}"]`)).not.toBeNull()
+    act(() => { h.controller.close(tab.id) })
+    expect(h.layout().expanded).toBe(true)
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+  })
+
+  it('keeps the add menu closed when a reload restores a pane holding the guide beside a real tab', async () => {
+    localStorage.clear()
+    try {
+      const withLauncher = (h: Awaited<ReturnType<typeof mountSeat>>): void => {
+        h.runtime.ctx.sidebarRightTabs.register({ id: 'test/add', kind: 'add', title: () => 'Add site', guide: [{ id: 'add', order: 0, title: () => 'Add site' }] })
+        h.controller.registerLauncher({ kinds: ['add'], label: 'Open a tab', emptyLabel: 'Click + to start' })
+      }
+      const before = await mountSeat(1440, true, 2)
+      act(() => {
+        withLauncher(before)
+        before.actions.setExpanded(SESSION, true)
+      })
+      fireEvent.keyDown(document, { key: 'Escape' })
+      before.open('beside.txt')
+      // A tab opened directly lands beside the guide; only a launcher pick replaces it.
+      expect(Object.values(before.layout().tabs).map(tab => tab.kind).sort()).toEqual(['guide', 'text'])
+      // Reload: the browser keeps the saved layout while the page goes away
+      // (disposing the test runtime closes the Session and clears it, so put it back),
+      // then a new runtime reads it from localStorage.
+      const key = 'dsh.sidebar-right.v1.s-test'
+      const saved = localStorage.getItem(key)
+      expect(saved).not.toBeNull()
+      runtimes.splice(runtimes.indexOf(before.runtime), 1)
+      await before.runtime.dispose()
+      localStorage.setItem(key, saved!)
+      const after = await mountSeat(1440, true, 2)
+      act(() => { withLauncher(after) })
+      expect(Object.values(after.layout().tabs).map(tab => tab.kind).sort()).toEqual(['guide', 'text'])
+      expect(after.view.container.querySelector('[data-sidebar-right-launcher]')).not.toBeNull()
+      expect(document.querySelector('[role="menu"]')).toBeNull()
+    } finally {
+      localStorage.clear()
+    }
+  })
+
+  it('opens the selected launcher page in the same pane using the keyboard', async () => {
+    const h = await mountSeat(1440, true, 2)
+    act(() => {
+      h.runtime.ctx.sidebarRightTabs.register({ id: 'test/add', kind: 'add', title: () => 'Add site', guide: [{ id: 'add', order: 0, title: () => 'Add site' }] })
+      h.controller.registerLauncher({ kinds: ['add', 'unavailable'], label: 'Open a tab', emptyLabel: 'Click + to start' })
+      h.actions.setExpanded(SESSION, true)
+    })
+    const paneId = h.layout().activePaneId
+    fireEvent.keyDown(document, { key: 'Escape' })
+    const button = element(h.view.container, '[data-sidebar-right-launcher]')
+    button.focus()
+    fireEvent.click(button)
+    expect(document.activeElement?.getAttribute('role')).toBe('menuitem')
+    fireEvent.keyDown(document.activeElement!, { key: 'Tab' })
+    expect(Object.values(h.layout().tabs).map(tab => tab.kind)).toEqual(['add'])
+    expect(h.layout().activePaneId).toBe(paneId)
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+  })
+
   it('keeps a background retained body through standard-source registration and removal', async () => {
     const h = await mountSeat(1440, true, 0, false, true)
     const tab = h.open('retained.txt')
@@ -218,7 +294,8 @@ describe('RightbarSeat presentation', () => {
   })
 
   it.each(['macos', 'windows'] as const)('keeps %s close commands on newly opened, revealed and replaced pages', async (platform) => {
-    const h = await mountSeat()
+    // Tracy: two doors, so the expansion is performed (none would be refused).
+    const h = await mountSeat(1440, true, 2)
     act(() => { h.registerPage('browser', true); h.registerPage('files'); h.registerPage('terminal', true) })
     const registry = new ShortcutRegistry('desktop', platform)
     const closeWindow = vi.fn()
@@ -391,6 +468,14 @@ describe('RightbarSeat presentation', () => {
   it.each([0, 1, 2])('selects the default from %i guide entries and protects only a sole guide', async (entryCount) => {
     const h = await mountSeat(1440, true, entryCount)
     act(() => { h.controller.toggleExpanded() })
+    if (entryCount === 0) {
+      // No doors: the guide the expansion would seed lists nothing, so the
+      // expansion is refused and the column stays collapsed and empty.
+      expect(h.layout().expanded).toBe(false)
+      expect(Object.keys(h.layout().tabs)).toHaveLength(0)
+      expect(h.view.container.querySelector('[data-dockkit-tab]')).toBeNull()
+      return
+    }
     const initial = Object.values(h.layout().tabs)[0]!
     expect(initial.kind).toBe(entryCount === 1 ? 'text' : 'guide')
     if (entryCount !== 1) {
@@ -455,9 +540,75 @@ describe('RightbarSeat presentation', () => {
     h.open()
     expect(element(h.view.container, '[data-sidebar-right-panel]')).toBe(panel)
     expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
-    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, undefined)
     await h.runtime.dispose()
     expect(h.frame.closeRightbar).toHaveBeenCalled()
+  })
+
+  it('reports the preferred width of the active tab type with its presentation', async () => {
+    const h = await mountSeat()
+    act(() => {
+      h.runtime.ctx.sidebarRightTabs.register({ id: 'test/form', kind: 'form', title: () => 'Form', preferredWidth: 600 })
+      h.runtime.slots.register({ name: 'sidebar.right.pane.tab', key: 'test/form' }, () => null)
+    })
+    h.open()
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, undefined)
+    act(() => { h.controller.openTabFromTarget('form', h.controller.commandTarget()!) })
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, 600)
+  })
+
+  it('Tracy: reports the width ceiling of the active tab type, hides the fullscreen switch and ignores the command', async () => {
+    const h = await mountSeat()
+    act(() => {
+      h.runtime.ctx.sidebarRightTabs.register({ id: 'test/form', kind: 'form', title: () => 'Form', preferredWidth: 600, maxWidth: 600 })
+      h.runtime.slots.register({ name: 'sidebar.right.pane.tab', key: 'test/form' }, () => null)
+    })
+    const text = h.open()
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, undefined)
+    expect(h.view.container.querySelector('[data-sidebar-right-mode]')).not.toBeNull()
+    act(() => { h.controller.openTabFromTarget('form', h.controller.commandTarget()!) })
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, 600, 600)
+    expect(h.view.container.querySelector('[data-sidebar-right-mode]')).toBeNull()
+    act(() => { h.controller.toggleFullscreen(h.controller.commandTarget()!) })
+    expect(h.layout().mode).toBe('push')
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, 600, 600)
+    // Leaving for a tab without a ceiling hands the frame back its uncapped report.
+    act(() => { h.actions.focusTab(SESSION, text.id) })
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, undefined)
+    expect(h.view.container.querySelector('[data-sidebar-right-mode]')).not.toBeNull()
+  })
+
+  it('Tracy: draws a recorded fullscreen mode as a normal panel under a width ceiling and keeps the mode', async () => {
+    const h = await mountSeat()
+    act(() => {
+      h.runtime.ctx.sidebarRightTabs.register({ id: 'test/form', kind: 'form', title: () => 'Form', maxWidth: 600 })
+      h.runtime.slots.register({ name: 'sidebar.right.pane.tab', key: 'test/form' }, () => null)
+    })
+    const text = h.open()
+    const panel = element(h.view.container, '[data-sidebar-right-panel]')
+    fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
+    expect(panel.dataset['sidebarRightPanel']).toBe('fullscreen')
+    act(() => { h.controller.openTabFromTarget('form', h.controller.commandTarget()!) })
+    expect(panel.dataset['sidebarRightPanel']).toBe('push')
+    expect(panel.style.width).toBe('420px')
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, undefined, 600)
+    expect(h.layout().mode).toBe('fullscreen')
+    act(() => { h.actions.focusTab(SESSION, text.id) })
+    expect(panel.dataset['sidebarRightPanel']).toBe('fullscreen')
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, true, undefined)
+  })
+
+  it('Tracy: keeps the automatic fullscreen of a narrow frame for a tab with a width ceiling', async () => {
+    const h = await mountSeat(700, false)
+    act(() => {
+      h.runtime.ctx.sidebarRightTabs.register({ id: 'test/form', kind: 'form', title: () => 'Form', maxWidth: 600 })
+      h.runtime.slots.register({ name: 'sidebar.right.pane.tab', key: 'test/form' }, () => null)
+    })
+    h.open()
+    act(() => { h.controller.openTabFromTarget('form', h.controller.commandTarget()!) })
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true, undefined)
+    expect(element(h.view.container, '[data-sidebar-right-panel]').dataset['sidebarRightPanel']).toBe('fullscreen')
+    expect(h.view.container.querySelector('[data-sidebar-right-mode]')).not.toBeNull()
   })
 
   it('fills the viewport without replacing the content tree or releasing the wide track', async () => {
@@ -471,12 +622,12 @@ describe('RightbarSeat presentation', () => {
     expect(panel.style.width).toBe('100vw')
     expect(panel.dataset['sidebarRightPanel']).toBe('fullscreen')
     expect(element(h.view.container, '[data-tab-body]')).toBe(body)
-    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, true)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, true, undefined)
     expect(h.bodies.get(tab.id)?.sidebar).toEqual({ expanded: true, fullscreen: true })
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     expect(panel.style.width).toBe('420px')
     expect(element(h.view.container, '[data-tab-body]')).toBe(body)
-    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, undefined)
     fireEvent.click(element(h.view.container, '[data-sidebar-right-toggle]'))
     expect(h.layout().expanded).toBe(false)
     expect(h.frame.closeRightbar).toHaveBeenCalled()
@@ -486,13 +637,13 @@ describe('RightbarSeat presentation', () => {
     const h = await mountSeat(767, false)
     h.open()
     expect(h.layout().mode).toBe('push')
-    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true, undefined)
     const stored = h.instance.getSnapshot()
     const body = element(h.view.container, '[data-tab-body]')
     h.view.update({ width: 420, viewportWidth: 768, canShow: true })
     expect(h.instance.getSnapshot()).toBe(stored)
     expect(element(h.view.container, '[data-tab-body]')).toBe(body)
-    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, undefined)
   })
 
   it('closes on automatic fullscreen exit and stays closed after widening', async () => {
@@ -532,9 +683,9 @@ describe('RightbarSeat presentation', () => {
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     const stored = h.instance.getSnapshot()
     h.view.update({ width: 420, viewportWidth: 500, canShow: false })
-    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true, undefined)
     h.view.update({ width: 420, viewportWidth: 1440, canShow: true })
-    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, true)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, true, undefined)
     expect(h.instance.getSnapshot()).toBe(stored)
   })
 
@@ -568,9 +719,9 @@ describe('RightbarSeat fullscreen entry', () => {
     expect(h.frame.openRightbar).not.toHaveBeenCalled()
     expect(h.frame.closeRightbar).not.toHaveBeenCalled()
     await act(async () => { slide.finish(); await slide.animation.finished })
-    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(true, true)
+    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(true, true, undefined)
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
-    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false, undefined)
     unrelated.finish()
   })
 
@@ -583,7 +734,7 @@ describe('RightbarSeat fullscreen entry', () => {
     vi.spyOn(element(h.view.container, '[data-sidebar-right-panel]'), 'getAnimations')
       .mockReturnValue([unrelated.animation, ended.animation])
     h.open()
-    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(true, true)
+    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(true, true, undefined)
     unrelated.finish()
   })
 
@@ -594,7 +745,7 @@ describe('RightbarSeat fullscreen entry', () => {
     h.open()
     expect(h.frame.openRightbar).not.toHaveBeenCalled()
     await act(async () => { slide.cancel(); await Promise.allSettled([slide.animation.finished]) })
-    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(false, true)
+    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(false, true, undefined)
   })
 
   it('waits for a replacement transform after cancellation', async () => {
@@ -608,7 +759,7 @@ describe('RightbarSeat fullscreen entry', () => {
     await act(async () => { first.cancel(); await Promise.allSettled([first.animation.finished]) })
     expect(h.frame.openRightbar).not.toHaveBeenCalled()
     await act(async () => { replacement.finish(); await replacement.animation.finished })
-    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(false, true)
+    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(false, true, undefined)
   })
 
   it.each(['close', 'push', 'session', 'unmount'])('ignores a late completion after %s', async (change) => {
@@ -641,7 +792,7 @@ describe('RightbarSeat fullscreen entry', () => {
     h.view.update({ width: 420, viewportWidth: 500, canShow: false })
     expect(h.frame.openRightbar).not.toHaveBeenCalled()
     await act(async () => { slide.finish(); await slide.animation.finished })
-    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(false, true)
+    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(false, true, undefined)
   })
 
   it('does not delay normal presentation behind its slide', async () => {
@@ -650,7 +801,7 @@ describe('RightbarSeat fullscreen entry', () => {
     const animations = vi.spyOn(element(h.view.container, '[data-sidebar-right-panel]'), 'getAnimations')
       .mockReturnValue([slide.animation])
     h.open()
-    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(true, false)
+    expect(h.frame.openRightbar).toHaveBeenCalledExactlyOnceWith(true, false, undefined)
     expect(animations).not.toHaveBeenCalled()
     slide.finish()
   })
@@ -728,7 +879,8 @@ describe('slot-owned useTabInfo', () => {
   })
 
   it('updates guide replacements through the same hook and guide boxes through framework injection', async () => {
-    const h = await mountSeat()
+    // Two doors, so the expansion is performed and still seeds the guide.
+    const h = await mountSeat(1440, true, 2)
     // The first expansion seeds the guide the replacement renders over.
     act(() => { h.controller.toggleExpanded() })
     let captured: SidebarRightTabInfo | undefined
@@ -790,7 +942,8 @@ describe('slot-owned useTabInfo', () => {
   })
 
   it('keeps the current binding in the disabled split tooltip when it changes or is cleared', async () => {
-    const h = await mountSeat()
+    // Tracy: two doors, so the expansion is performed (none would be refused).
+    const h = await mountSeat(1440, true, 2)
     const split: ShortcutCatalogEntry = {
       id: 'pane.split' as ShortcutCommandId, label: 'Split', aliases: [],
       binding: { code: 'Backslash', modifiers: ['meta'] }, modified: false, conflicts: [], issue: null,
@@ -827,7 +980,8 @@ describe('slot-owned useTabInfo', () => {
   })
 
   it('explains the two-pane limit and adds a guide only to a pane without one', async () => {
-    const h = await mountSeat()
+    // Two doors, so the expansion is performed and still seeds the guide.
+    const h = await mountSeat(1440, true, 2)
     // Expanding first seeds the left pane's guide; only the right pane will lack one.
     act(() => { h.controller.toggleExpanded() })
     h.open()

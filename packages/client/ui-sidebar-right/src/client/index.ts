@@ -41,12 +41,12 @@ import { RightbarRoot, type RightbarRootInjected } from './shell/RightbarRoot.ts
 import { SidebarSessionViews } from './session-views.ts'
 import { createSidebarRightController, type SidebarRightController } from './service.ts'
 import { SidebarRightTabRegistry } from './tab-registry.ts'
-import { createSidebarRightStore } from './stores.ts'
+import { createSidebarRightStore, keepsLastOf } from './stores.ts'
 import { en, zh } from './locales.ts'
 import { GUIDE_ID, guideDefinition } from './tabs/guide/definition.ts'
 import { guideTabInfoFactory, tabInfoFactory } from './tab-info.ts'
 import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
-import { defaultSeed } from './contract/seed.ts'
+import { defaultSeed, hasDoors } from './contract/seed.ts'
 
 export type { SidebarRightTarget } from './focus.ts'
 export type { RightbarSeatProps, SidebarRightInjected, SidebarRightPresentation } from './shell/SidebarRight.tsx'
@@ -54,7 +54,7 @@ export type { GuideBodyProps, GuideInjected } from './tabs/guide/GuideBody.tsx'
 export type { ExpandButtonProps } from './shell/ExpandButton.tsx'
 export type { SidebarRightState, SurfaceState } from './stores.ts'
 export type {
-  ISidebarRight, SidebarRightOpenResourceOptions, SidebarRightOpenTabOptions,
+  ISidebarRight, SidebarRightLauncher, SidebarRightOpenResourceOptions, SidebarRightOpenTabOptions,
   SidebarRightPlacement, SidebarRightCloseHandler, SurfaceActions,
 } from './service.ts'
 export type {
@@ -125,6 +125,8 @@ export function apply(ctx: ClientContext): void {
     (address, signal) => { ctx.resources.pin(address, signal) },
     {
       autoFullscreen: () => autoFullscreen,
+      // Tracy (TCH K1): an open the person did not press for stays out of sight on a narrow frame.
+      userGesture: () => globalThis.navigator?.userActivation?.isActive ?? true,
       openWithFocus: (sessionId, open) => { openWithPaneFocus(document, sessionId, open) },
       closeWithFocus: (sessionId, paneId, close) => { closeWithPaneFocus(document, sessionId, paneId, close) },
     },
@@ -166,7 +168,13 @@ export function apply(ctx: ClientContext): void {
   if (typeof document !== 'undefined') ctx.effect(() => observeSidebarFocus(document), 'ui-sidebar-right: focus')
 
   ctx.effect(() => {
-    const handle = createSidebarRightStore(() => defaultSeed(tabs))
+    // Tracy: the second thunk refuses an expansion that would show nothing (no doors).
+    const handle = createSidebarRightStore(
+      () => controller.launcher.getSnapshot() === undefined ? defaultSeed(tabs) : { kind: 'guide', title: t('tab.guide.title') },
+      () => hasDoors(tabs),
+      () => controller.launcher.getSnapshot() !== undefined,
+      keepsLastOf(kind => tabs.get(kind)),
+    )
     // Each Session Context generation owns one Store. Background tab actions
     // use the latest adoption for that Session.
     const adoptions = new Map<SessionId, () => void>()
@@ -185,10 +193,13 @@ export function apply(ctx: ClientContext): void {
         } }
       },
     }
+    const layout: ILayout = ctx.layout
     const injected: Omit<SidebarRightInjected, 'keyedHooks' | 'occurrence' | 'closeTab' | 'measureRoom'> = {
-      syncPresentation({ shown, track, fullscreen }) {
-        if (shown) layout.openRightbar(track, fullscreen)
-        else layout.closeRightbar()
+      syncPresentation({ shown, track, fullscreen, preferredWidth, maxWidth }) {
+        // Tracy: the width ceiling travels only when the active tab's type names one.
+        if (!shown) layout.closeRightbar()
+        else if (maxWidth === undefined) layout.openRightbar(track, fullscreen, preferredWidth)
+        else layout.openRightbar(track, fullscreen, preferredWidth, maxWidth)
       },
       reportAutoFullscreen: (value) => { autoFullscreen = value },
       splitPane: (paneId) => { controller.split(paneId) },
@@ -196,6 +207,7 @@ export function apply(ctx: ClientContext): void {
       openTab: (kind, options) => { controller.openTab(kind, options) },
       hooks: {
         shortcuts: ctx.shortcuts.catalog,
+        launcher: controller.launcher,
         tabTypes: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.entries() },
       },
     }
@@ -235,20 +247,23 @@ export function apply(ctx: ClientContext): void {
     // the panel is expanded, and to ask for it to be. The header's corner seat
     // is its own place, past the utilities, so showing and hiding it moves
     // nothing else in the row.
-    const disposeExpand = ctx.slots.inject('conversation.session.header.corner', () => ctx.slots.register({
-      name: 'conversation.session.header.corner',
-      locale: NS,
-      store,
-      inject: () => ({ hooks: { shortcuts: ctx.shortcuts.catalog } }),
-    }, ExpandButton))
-    // Stage two for the guide: it declares the chain child it hosts and reads
-    // the registry's entry boxes, which an ordinary type has no reason to do.
+    // The registry's entry boxes, observable: the guide lists them, and the
+    // expand button reads whether there are any (with none, the column has
+    // nothing to open onto and the button is not offered).
     const guideInjected: GuideInjected = {
       hooks: {
         shortcuts: ctx.shortcuts.catalog,
         guideEntries: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.guide() },
       },
     }
+    const disposeExpand = ctx.slots.inject('conversation.session.header.corner', () => ctx.slots.register({
+      name: 'conversation.session.header.corner',
+      locale: NS,
+      store,
+      inject: () => guideInjected,
+    }, ExpandButton))
+    // Stage two for the guide: it declares the chain child it hosts and reads
+    // the registry's entry boxes, which an ordinary type has no reason to do.
     const disposeGuide = ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: GUIDE_ID,

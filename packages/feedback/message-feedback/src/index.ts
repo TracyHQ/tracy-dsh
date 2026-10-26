@@ -64,7 +64,8 @@ const itemSchema = z.object({
   messageId: z.string().min(1),
   rating: z.enum(['positive', 'negative']),
   note: z.string().refine(note => note.trim().length > 0).optional(),
-  category: z.enum(FEEDBACK_CATEGORIES).optional(),
+  category: z.enum(['task-result', 'instruction-following', 'product-interaction', 'service-stability', 'resource-cost', 'security-privacy-permission', 'other']).optional(),
+  categories: z.array(z.enum(FEEDBACK_CATEGORIES)).refine(items => new Set(items).size === items.length).optional(),
   version: z.uuid(),
   createdAt: timestamp,
   updatedAt: timestamp,
@@ -178,8 +179,9 @@ export class MessageFeedbackService extends TypertRemoteService {
       if (request.ifVersion !== (existing?.version ?? null)) {
         return rejected(this.versionConflict(existing ?? null))
       }
+      const categories = FEEDBACK_CATEGORIES.filter(category => request.categories?.includes(category))
       if (existing !== undefined && existing.rating === request.rating && existing.note === note.value
-        && existing.category === request.category) {
+        && JSON.stringify(existing.categories ?? []) === JSON.stringify(categories) && existing.category === undefined) {
         await append()
         return success(snapshotItem(existing))
       }
@@ -188,7 +190,7 @@ export class MessageFeedbackService extends TypertRemoteService {
         messageId: request.messageId,
         rating: request.rating,
         ...(note.value === undefined ? {} : { note: note.value }),
-        ...(request.category === undefined ? {} : { category: request.category }),
+        ...(categories.length === 0 ? {} : { categories }),
         version: randomUUID() as MessageFeedbackVersion,
         createdAt: existing?.createdAt ?? now,
         updatedAt: existing === undefined ? now : Math.max(now, existing.updatedAt),

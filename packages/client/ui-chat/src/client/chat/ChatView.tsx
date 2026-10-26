@@ -8,13 +8,15 @@ import type {
 import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import type { PendingSubmission } from '@deepseek-ai/dsh-api-session-controller/client'
 import {
-  Button, IconChevronDownOutlineRegular, MarkdownDelegateProvider, Modal,
+  Button, IconChevronDownOutlineRegular, MarkdownDelegateProvider, Modal, UserTextFoldsProvider,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps, OpenFileOptions } from '../contract/slots.ts'
 import type { ChatSnapshot } from '../contract/snapshot.ts'
 import { PendingSteeringBubble, PendingSubmissionBubble } from './MessageItem.tsx'
 import { ChatNodeSeat } from './ChatNodeSeat.tsx'
 import { ChatGroupSeat } from './ChatGroupSeat.tsx'
+import { ChatLocalSeat } from './ChatLocalSeat.tsx'
+import { withLocalRows, type ViewEntry } from './local-rows.ts'
 import { chatRenderKey } from './render-entry.ts'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { TurnNavigator } from './TurnNavigator.tsx'
@@ -57,7 +59,7 @@ function observedInputs(
 type PendingInput = PendingSubmission | InboxState['next-step'][number]
 
 type ChatNodeListProps = Omit<ComponentProps<typeof ChatNodeSeat>, 'nodeKey' | 'groupPart'> & {
-  readonly entries: readonly RenderEntry[]
+  readonly entries: readonly ViewEntry[]
   readonly useChatGroup: ChatViewSlotProps['useChatGroup']
   readonly pendingInputs: readonly PendingInput[]
   readonly lastInputTurn: number | undefined
@@ -71,6 +73,12 @@ const ChatNodeList = memo(function ChatNodeList({ entries, useChatGroup, pending
           {...entry.groupPart === undefined ? {} : { groupPart: entry.groupPart }} />
       case 'group':
         return <ChatGroupSeat {...seatProps} key={chatRenderKey(entry)} groupKey={entry.key} useChatGroup={useChatGroup} />
+      case 'local':
+        return <ChatLocalSeat key={entry.node.key} node={entry.node} cwd={seatProps.cwd}
+          openFile={seatProps.openFile} openSkill={seatProps.openSkill} inspectCall={seatProps.inspectCall}
+          forkAt={seatProps.forkAt} loadImage={seatProps.loadImage}
+          renderMessageImages={seatProps.renderMessageImages} fileMentions={seatProps.fileMentions}
+          renderSlot={seatProps.renderSlot} t={seatProps.t} />
       default:
         return assertNever(entry)
     }
@@ -82,14 +90,17 @@ const ChatNodeList = memo(function ChatNodeList({ entries, useChatGroup, pending
     <PendingSteeringBubble key={item.id} content={item.content}
       renderMessageImages={seatProps.renderMessageImages} t={seatProps.t} />
   ))
-  const tail = entries.at(-1)
+  // The tail is the last LOG entry: a client-local row drawn after it must not
+  // hide the opening control from this check.
+  const tailIndex = entries.findLastIndex(entry => entry.kind !== 'local')
+  const tail = entries[tailIndex]
   const node = tail?.kind === 'node' ? seatProps.nodeStore.get(tail.key) : undefined
   // An empty opening control follows one local transcript echo, never steering.
   // All rows share this keyed list so inserting the control keeps the echo mounted.
   if (node?.kind === 'turn-process' && node.location.kind === 'turn'
     && node.location.turn.status === 'open' && node.location.turn.turn !== lastInputTurn) {
     const index = pendingInputs.findIndex(item => 'requestId' in item && item.placement === 'transcript')
-    if (index !== -1) rows.splice(rows.length - 1, 0, ...pendingRows.splice(index, 1))
+    if (index !== -1) rows.splice(tailIndex, 0, ...pendingRows.splice(index, 1))
   }
   return [...rows, ...pendingRows]
 })
@@ -99,15 +110,30 @@ const ChatNodeList = memo(function ChatNodeList({ entries, useChatGroup, pending
  * ordered business Node crosses the keyed renderer seat.
  */
 export function ChatView({
-  useSession, useChat, useChatNode, useChatNodeProcess, useChatGroup, useConversation, useSessions, useStore, actions, renderSlot,
+  useSession, useChat, useLocalRows, useChatNode, useChatNodeProcess, useChatGroup, useConversation, useSessions, useStore, actions, renderSlot,
   sessionId, openFile, openSkill, openExternalLink, loadOlder, loadThrough, loadImage, inspectCall, chatScroll, forkAt, fileMentions,
-  usePresentation, useProjection, t,
+  usePresentation, useProjection, useTextFolds, t,
 }: ChatViewSlotProps) {
+  // One fold list for the durable user rows and the submission echo below, so
+  // both hide the same fenced blocks and the echo never changes size on arrival.
+  const textFolds = useTextFolds(list => list)
   const order = useChat(s => s.order)
   const groupedEntries = useConversation(snapshot => snapshot.views.grouped('chat')?.entries)
-  const entries = useMemo<readonly RenderEntry[]>(() => groupedEntries
+  const logEntries = useMemo<readonly RenderEntry[]>(() => groupedEntries
     ?? order.map(key => ({ kind: 'node', key: key as NodeKey })), [groupedEntries, order])
   const nodeStore = useChat(s => s.nodes)
+  const localRows = useLocalRows(rows => rows)
+  const groupedView = useConversation(snapshot => snapshot.views.grouped('chat'))
+  // `order` is the recompute trigger: a group gaining a member keeps `entries`
+  // as it was, but every append replaces `order`.
+  const entries = useMemo<readonly ViewEntry[]>(() => withLocalRows(logEntries, localRows, (entry) => {
+    if (entry.kind === 'node') return nodeStore.get(entry.key)?.anchorSeq ?? -1
+    // A group is one stretch of the log: it counts at its first member, so a row
+    // anchored inside it lands after it.
+    const members = groupedView?.groupSource(entry.key).getSnapshot()?.members ?? []
+    const first = Math.min(...members.map(member => nodeStore.get(member.key)?.anchorSeq ?? Infinity))
+    return Number.isFinite(first) ? first : -1
+  }), [logEntries, localRows, nodeStore, groupedView, order])
   // The rail's items are accumulated in the Chat snapshot, so this selector is
   // both the data and its change signal: the array identity moves only when a
   // Turn enters, leaves, or changes its preview.
@@ -254,28 +280,30 @@ export function ChatView({
               </div>
             )}
             <MarkdownDelegateProvider openExternalLink={openExternalLink} openFile={requestOpenFile} fileImages={fileImages}>
-              <ChatNodeList
-                entries={entries}
-                pendingInputs={pendingInputs}
-                lastInputTurn={lastInputTurn}
-                nodeStore={nodeStore}
-                useChatGroup={useChatGroup}
-                useChatNode={useChatNode}
-                useChatNodeProcess={useChatNodeProcess}
-                usePresentation={usePresentation}
-                useStore={useStore}
-                actions={actions}
-                cwd={cwd}
-                openFile={requestOpenFile}
-                openSkill={openSkill}
-                inspectCall={inspectCall}
-                forkAt={forkAt}
-                loadImage={loadImage}
-                renderMessageImages={renderMessageImages}
-                fileMentions={fileMentions}
-                renderSlot={renderSlot}
-                t={t}
-              />
+              <UserTextFoldsProvider folds={textFolds}>
+                <ChatNodeList
+                  entries={entries}
+                  pendingInputs={pendingInputs}
+                  lastInputTurn={lastInputTurn}
+                  nodeStore={nodeStore}
+                  useChatGroup={useChatGroup}
+                  useChatNode={useChatNode}
+                  useChatNodeProcess={useChatNodeProcess}
+                  usePresentation={usePresentation}
+                  useStore={useStore}
+                  actions={actions}
+                  cwd={cwd}
+                  openFile={requestOpenFile}
+                  openSkill={openSkill}
+                  inspectCall={inspectCall}
+                  forkAt={forkAt}
+                  loadImage={loadImage}
+                  renderMessageImages={renderMessageImages}
+                  fileMentions={fileMentions}
+                  renderSlot={renderSlot}
+                  t={t}
+                />
+              </UserTextFoldsProvider>
             </MarkdownDelegateProvider>
             {running && <RunningStatus startTime={runningStartTime} t={t} />}
             {/* No pending placeholders: questions (ui-user-questions) and approvals

@@ -182,7 +182,7 @@ External packages **directly declared** for development, tests, types, or toolin
 | [`@electron/get`](https://github.com/electron/get) | MIT |
 | [`@electron/notarize`](https://github.com/electron/notarize) | MIT |
 | [`@lexical/headless`](https://github.com/facebook/lexical) | MIT |
-| [`@modelcontextprotocol/node`](https://github.com/modelcontextprotocol/typescript-sdk) | MIT |
+| [`@modelcontextprotocol/node`](https://github.com/modelcontextprotocol/typescript-sdk) | Apache-2.0 |
 | [`@modelcontextprotocol/server`](https://github.com/modelcontextprotocol/typescript-sdk) | MIT |
 | [`@modelcontextprotocol/server-everything`](https://github.com/modelcontextprotocol/servers) | MIT / Apache-2.0 |
 | [`@modelcontextprotocol/server-filesystem`](https://github.com/modelcontextprotocol/servers) | MIT / Apache-2.0 |

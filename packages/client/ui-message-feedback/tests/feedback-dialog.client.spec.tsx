@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * FeedbackDialog rendering: the modal shows the seven category chips, the
+ * FeedbackDialog rendering: the modal shows the five multi-select category chips, the
  * detail box, and the hint while a target is open; a chip toggles the
- * category through the injected verb; Submit routes to the controller and
+ * categories through the injected verb; Submit routes to the controller and
  * stays enabled with an empty draft; a failure code renders a warning toast;
  * and the acknowledgement toast mounts from the toast sequence and retires
  * through dismissToast once its fade completes.
@@ -24,7 +24,7 @@ const t = makeTranslate(zh, commonZh)
 /** Render the entry over a fixed state and recording verbs. */
 function mount(overrides: Partial<FeedbackDialogState> = {}) {
   const state: FeedbackDialogState = {
-    target: { kind: 'session' }, category: null, text: '', submitting: false, failure: null, toast: 0,
+    target: { kind: 'session' }, categories: [], text: '', submitting: false, failure: null, toast: 0,
     ...overrides,
   }
   const verbs = {
@@ -41,11 +41,11 @@ function mount(overrides: Partial<FeedbackDialogState> = {}) {
 }
 
 describe('FeedbackDialog', () => {
-  it('owns the conversation-log disclosure and stability category in both supported locales', () => {
-    expect(zh['dialog.hint']).toBe('填写详情以帮助我们改进体验，提交内容会包括当前对话的日志')
-    expect(en['dialog.hint']).toBe('Add details to help us improve. Your submission will include the current conversation log.')
-    expect(zh['category.service-stability']).toBe('稳定性和速度')
-    expect(en['category.service-stability']).toBe('Stability and speed')
+  it('owns the concise hint and feedback categories in both supported locales', () => {
+    expect(zh['dialog.hint']).toBe('填写详情以帮助我们改进')
+    expect(en['dialog.hint']).toBe('Add details to help us improve.')
+    expect(zh['category.general']).toBe('常规')
+    expect(en['category.general']).toBe('General')
   })
 
   it('renders nothing but the probe while closed with no toast', () => {
@@ -68,17 +68,20 @@ describe('FeedbackDialog', () => {
     expect(ui.getByRole('button', { name: commonZh.submit }).hasAttribute('disabled')).toBe(false)
   })
 
-  it('selects a chip, and clears it when the selected chip is clicked again', () => {
-    const ui = mount({ category: 'task-result' })
+  it('selects multiple chips and clears an individual selected chip', () => {
+    const ui = mount({ categories: ['general'] })
 
     const chips = ui.getByRole('group', { name: zh['dialog.categories'] }).querySelectorAll('button')
     expect(chips[0]?.getAttribute('aria-pressed')).toBe('true')
     expect(chips[1]?.getAttribute('aria-pressed')).toBe('false')
 
     fireEvent.click(chips[1]!)
-    expect(ui.edit).toHaveBeenLastCalledWith({ category: 'instruction-following' })
-    fireEvent.click(chips[0]!)
-    expect(ui.edit).toHaveBeenLastCalledWith({ category: null })
+    expect(ui.edit).toHaveBeenLastCalledWith({ categories: ['general', 'product-feature'] })
+
+    const selected = mount({ categories: ['general', 'product-feature'] })
+    const selectedChips = selected.getAllByRole('group', { name: zh['dialog.categories'] })[1]!.querySelectorAll('button')
+    fireEvent.click(selectedChips[0]!)
+    expect(selected.edit).toHaveBeenLastCalledWith({ categories: ['product-feature'] })
   })
 
   it('forwards typing, submits, and closes through the injected verbs', () => {

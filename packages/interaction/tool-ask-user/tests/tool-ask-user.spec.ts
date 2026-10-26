@@ -401,6 +401,138 @@ describe('ask_user_question tool', () => {
     }])
   })
 
+  // Tracy: the four cases below describe the legacy (blocking) tool, the mode Tracy ships;
+  // the file's default setup() builds the timed tool.
+  it('declares recommended on a question and action/note on the output', async () => {
+    const ctx = await setup({ mode: 'legacy' })
+    const schema = ctx.tools.schemas().find(tool => tool.name === 'ask_user_question')
+    const parameters = schema?.parameters as unknown as OptionSchemaShape
+    expect(parameters.properties.questions.items.properties).toMatchObject({
+      recommended: { type: 'string' },
+    })
+    const output = ctx.tools.get('ask_user_question')?.output?.schema as unknown as {
+      properties: Record<string, unknown>
+    }
+    expect(output.properties).toMatchObject({
+      action: { type: 'string', enum: ['submit', 'decide', 'follow_up'] },
+      note: { type: 'string' },
+    })
+  })
+
+  it('forwards recommended to the user-questions request', async () => {
+    const ctx = await setup({ mode: 'legacy' })
+    const seen: AskUserQuestionRequest[] = []
+    registerQuestionAnswerer(ctx, {
+      async ask(request) {
+        seen.push(request)
+        return { answers: [{ id: 'pkg', selected: ['npm'] }] }
+      },
+    })
+
+    await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('ask-recommended-field'),
+      name: 'ask_user_question',
+      arguments: {
+        questions: [{
+          id: 'pkg', question: 'Which package manager?', recommended: 'npm',
+          options: [{ label: 'pnpm' }, { label: 'npm' }],
+        }],
+      },
+    })
+
+    expect(seen[0]?.questions[0]).toEqual({
+      id: 'pkg', question: 'Which package manager?', recommended: 'npm',
+      options: [{ label: 'pnpm' }, { label: 'npm' }],
+    })
+  })
+
+  it('keeps the bare answer JSON when the answerer sets no action', async () => {
+    const ctx = await setup()
+    registerQuestionAnswerer(ctx, {
+      async ask() { return { answers: [{ id: 'pkg', selected: [] }] } },
+    })
+
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('ask-no-action'),
+      name: 'ask_user_question',
+      arguments: { questions: [{ id: 'pkg', question: 'Which package manager?' }] },
+    })
+
+    expect(result).toMatchObject({
+      isError: false,
+      value: { answers: [{ id: 'pkg', selected: [] }] },
+      content: [{ type: 'text', text: '{"answers":[{"id":"pkg","selected":[]}]}' }],
+    })
+  })
+
+  it('tells the model when the customer asks for follow-up questions', async () => {
+    const ctx = await setup({ mode: 'legacy' })
+    registerQuestionAnswerer(ctx, {
+      async ask() {
+        return {
+          answers: [{ id: 'pkg', selected: ['npm'] }, { id: 'ci', selected: [] }],
+          action: 'follow_up',
+          note: 'What does CI change?',
+        }
+      },
+    })
+
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('ask-follow-up'),
+      name: 'ask_user_question',
+      arguments: { questions: [{ id: 'pkg', question: 'Package manager?' }, { id: 'ci', question: 'Add CI?' }] },
+    })
+
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected ask_user_question success')
+    expect(result.value).toEqual({
+      answers: [{ id: 'pkg', selected: ['npm'] }, { id: 'ci', selected: [] }],
+      action: 'follow_up',
+      note: 'What does CI change?',
+    })
+    expect(result.content).toEqual([{
+      type: 'text',
+      text: '{"answers":[{"id":"pkg","selected":["npm"]},{"id":"ci","selected":[]}],"action":"follow_up","note":"What does CI change?"}\n'
+        + 'The customer asked for follow-up questions before deciding; ask only what is new, do not repeat answered questions.',
+    }])
+  })
+
+  it('tells the model which questions the customer left to it', async () => {
+    const ctx = await setup({ mode: 'legacy' })
+    registerQuestionAnswerer(ctx, {
+      async ask() {
+        return {
+          // `ci` comes back empty, `docs` is not returned at all; `notes` was answered in free text.
+          answers: [{ id: 'pkg', selected: ['npm'] }, { id: 'ci', selected: [] }, { id: 'notes', selected: [], custom: 'none' }],
+          action: 'decide',
+        }
+      },
+    })
+
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('ask-decide'),
+      name: 'ask_user_question',
+      arguments: {
+        questions: [
+          { id: 'pkg', question: 'Package manager?' },
+          { id: 'ci', question: 'Add CI?' },
+          { id: 'docs', question: 'Write docs?' },
+          { id: 'notes', question: 'Anything else?' },
+        ],
+      },
+    })
+
+    expect(result.content).toEqual([{
+      type: 'text',
+      text: '{"answers":[{"id":"pkg","selected":["npm"]},{"id":"ci","selected":[]},{"id":"notes","selected":[],"custom":"none"}],"action":"decide"}\n'
+        + 'The customer left the unanswered questions to you: ci, docs',
+    }])
+  })
+
   it('passes the tool abort signal to the user-questions request', async () => {
     const ctx = await setup()
     const seen: AskUserQuestionRequest[] = []

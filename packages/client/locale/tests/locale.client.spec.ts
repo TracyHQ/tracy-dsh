@@ -321,7 +321,15 @@ describe('LocaleRuntime', () => {
   it('opens provisionally in the browser language, matching regional variants on their primary subtag', () => {
     stubLanguages('en-GB', 'zh-CN')
     expect(make().svc.getLocale().active).toBe('en')
-    stubLanguages('zh-Hant-TW')
+    // Tracy: Traditional-script Chinese never lands on the Simplified `zh` pack; with no other
+    // shipped language in the list it opens in English, and a later tag still wins.
+    for (const tag of ['zh-Hant-TW', 'zh-TW', 'zh-HK', 'zh-MO', 'zh-Hant', 'zh_TW']) {
+      stubLanguages(tag)
+      expect(make().svc.getLocale().active).toBe('en')
+    }
+    stubLanguages('zh-TW', 'zh-CN')
+    expect(make().svc.getLocale().active).toBe('zh')
+    stubLanguages('zh-SG')
     expect(make().svc.getLocale().active).toBe('zh')
     // An unshipped language walks the list to the first one this app ships.
     stubLanguages('fr-FR', 'en-US')
@@ -336,6 +344,16 @@ describe('LocaleRuntime', () => {
     // product default rather than an arbitrary near-match.
     stubLanguages('fr-FR', 'de')
     expect(make().svc.getLocale().active).toBe('en')
+  })
+
+  it('lets a Traditional-script Chinese browser match a Traditional pack (Tracy)', () => {
+    stubLanguages('zh-Hant-TW')
+    const { svc } = make()
+    expect(svc.getLocale().active).toBe('en')
+    const dispose = svc.addLanguage({ id: 'zh-TW', label: '繁體中文', fallback: 'en' })
+    expect(svc.getLocale().active).toBe('zh-TW')
+    dispose()
+    expect(svc.getLocale().active).toBe('en')
   })
 
   it('re-evaluates browser languages as external definitions register and unload', () => {

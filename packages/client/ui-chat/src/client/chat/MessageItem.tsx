@@ -2,7 +2,10 @@ import { Fragment, memo, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { PendingSubmission } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { MessageImageSource } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { fileExtension, FileTypeIcon, fileSizeText, JsonBlock, projectUserText, StateDot, TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  fileExtension, FileTypeIcon, fileSizeText, JsonBlock, projectUserText, StateDot, useUserTextFolds,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import { TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatNodeOwnerProps, ChatNodeViewProps, ChatViewSlotProps } from '../contract/slots.ts'
 import type { ModelRetryNode, TurnErrorNode, UserMessageNode } from '../contract/snapshot.ts'
 import { CompactionItem } from './CompactionItem.tsx'
@@ -47,6 +50,18 @@ interface RetryCountdown {
   seconds: number
 }
 
+/** A code scoped under its producer's own name (`owner/name`); that producer writes the message for the person. */
+const PRODUCT_FAILURE_CODE = /^[a-z][\w-]*\//
+
+/**
+ * The failure line a person reads. Codes this view translates get their line;
+ * a product-scoped code keeps its producer's message; any other code, or none,
+ * gets one generic line, because the raw message is provider or runtime text.
+ * @param message - the recorded failure message.
+ * @param code - the recorded failure code, when present.
+ * @param t - the chat dictionary.
+ * @returns the localized line, or the product's own message.
+ */
 function failureMessage(
   message: string,
   code: unknown,
@@ -55,7 +70,21 @@ function failureMessage(
   if (code === 'ACCOUNT_SIGNED_OUT') return t('message.failure.accountSignedOut')
   if (code === 'ACCOUNT_SIGN_IN_REQUIRED') return t('message.failure.accountSignInRequired')
   if (code === 'QUOTA' || code === 'ACCOUNT_QUOTA') return t('message.failure.quota')
-  return code === 'AUTH' ? t('message.failure.auth') : message
+  if (code === 'ATTACHMENT_MISSING') return t('message.failure.attachmentMissing')
+  if (code === 'AUTH') return t('message.failure.auth')
+  if (typeof code === 'string' && PRODUCT_FAILURE_CODE.test(code)) return message
+  return t('message.failure.unknown')
+}
+
+/** The failure line; when it replaces the recorded message, that message stays readable as the hover title. */
+function FailureText({ message, code, t, className }: {
+  message: string
+  code: unknown
+  t: ChatViewSlotProps['t']
+  className?: string | undefined
+}) {
+  const line = failureMessage(message, code, t)
+  return <span className={className} title={line === message ? undefined : message}>{line}</span>
 }
 
 function ModelRetryItem({ node, active, t }: {
@@ -119,7 +148,7 @@ function ModelRetryItem({ node, active, t }: {
         </div>
         <div>
           <span className={css.retryDetailLabel}>{t('message.retry.failure')}</span>
-          {failureMessage(node.failure.message, node.failure.code, t)}
+          <FailureText message={node.failure.message} code={node.failure.code} t={t} />
         </div>
       </div>
     </details>
@@ -136,7 +165,7 @@ function TurnErrorItem({ node, t }: {
       <StateDot state="error" className={css.turnErrorDot} />
       <div className={css.turnErrorCopy}>
         <span className={css.turnErrorTitle}>{node.code === 'ACCOUNT_SIGNED_OUT' ? t('message.accountStopped') : t('message.turnError')}</span>
-        <span className={css.turnErrorMessage}>{failureMessage(node.message, node.code, t)}</span>
+        <FailureText className={css.turnErrorMessage} message={node.message} code={node.code} t={t} />
       </div>
       {node.code !== undefined && <code className={css.turnErrorCode}>{node.code}</code>}
     </div>
@@ -185,6 +214,7 @@ function UserStyleBubble({
   const compactImages = attachments.length > 1
   const truncated = (total: number): string => t('json.truncated', { total })
   const showBubble = text !== '' || rest.length > 0
+  const folds = useUserTextFolds()
   return (
     <div
       className={css.userRow}
@@ -219,7 +249,7 @@ function UserStyleBubble({
           </div>
         )}
         {showBubble && <div className={css.bubble}>
-          {projectUserText(text, referenceLabels, skillNames, 'skill', references)}
+          {projectUserText(text, referenceLabels, skillNames, 'skill', references, folds)}
           {rest.map((block, i) => <JsonBlock key={i} label={t('message.extraBlock')} payload={block} truncatedLabel={truncated} />)}
         </div>}
         {referenceLabels.length > 0 && (

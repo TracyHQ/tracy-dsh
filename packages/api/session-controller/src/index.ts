@@ -429,6 +429,15 @@ export class SessionController extends TypertRemoteService {
   }
 
   /**
+   * Wake one idle Agent whose follow-ups `api-session/prompt-hold` held in its queue.
+   * @param sessionId - Session whose held follow-ups are released; a cold Session is resumed.
+   * @returns the number of follow-ups released; 0 while still held, while running, or when none is pending.
+   */
+  releaseHeldPrompts(sessionId: SessionId): Promise<number> {
+    return this.commands.releaseHeldPrompts(sessionId)
+  }
+
+  /**
    * Read one image proven reachable from the addressed Session log.
    * @param request - Session and attachment identities used for authorization.
    * @returns the durable attachment reference and base64-encoded bytes.

@@ -146,6 +146,9 @@ export function ConversationSessionHeader({
               key={viewTab.id}
               type="button"
               role="tab"
+              // Tracy: names the tab by its view id so a host can address one
+              // tab (hide Trajectory for customers) without a positional selector.
+              data-view={viewTab.id}
               aria-selected={viewTab.id === active?.id}
               className={clsx(css.tab, viewTab.id === active?.id && css.tabActive)}
               onClick={() => { selectView(viewTab.id) }}

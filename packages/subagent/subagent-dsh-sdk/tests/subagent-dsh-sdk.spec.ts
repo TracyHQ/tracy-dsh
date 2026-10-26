@@ -107,7 +107,7 @@ function text(blocks: readonly { type: string; text?: string }[]): string {
 }
 
 function expectedFailure(fields: string): string {
-  return `Subagent failure (provider: DSH SDK; ${fields})`
+  return `Subagent failure (provider: Tracy SDK; ${fields})`
 }
 
 /**

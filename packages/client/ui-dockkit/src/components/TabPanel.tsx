@@ -209,7 +209,8 @@ function splitBlockedTitle(labels: PaneCallbacks['labels'], block: SplitBlock): 
 }
 
 /** @param props - pane state and gestures. @returns its tab strip without a content container. */
-export function TabStrip({ state, pane, callbacks }: TabPanelProps): ReactNode {
+export function TabStrip({ state, pane, callbacks, active = true }: TabPanelProps & { active?: boolean }): ReactNode {
+  const visibleTabs = pane.tabs.filter(id => callbacks.isTabVisible?.(getTab(state, id)) !== false)
   // The open context menu and the chip that opened it; the menu positions
   // itself against that chip from its portal.
   const [menu, setMenu] = useState<{ readonly tabId: TabId; readonly anchor: HTMLElement } | undefined>(undefined)
@@ -247,6 +248,7 @@ export function TabStrip({ state, pane, callbacks }: TabPanelProps): ReactNode {
       <div ref={stripTabs} className={css.stripTabs} role="presentation" data-dockkit-strip-tabs={pane.id}>
         {pane.tabs.map((tabId, index) => {
           const tab = getTab(state, tabId)
+          if (!visibleTabs.includes(tabId)) return null
           const selected = tabId === pane.activeTabId
           const closable = callbacks.canCloseTab(tabId)
           // A pane's lone unclosable chip is a label, not a choice: there is
@@ -294,7 +296,7 @@ export function TabStrip({ state, pane, callbacks }: TabPanelProps): ReactNode {
                   // Keys on the chip's nested close control are that control's.
                   if (event.target !== event.currentTarget) return
                   if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return
-                  const next = chipToFocus(event.key, pane.tabs, tabId)
+                  const next = chipToFocus(event.key, visibleTabs, tabId)
                   if (next !== undefined) {
                     event.preventDefault()
                     focusChip(next)
@@ -347,7 +349,7 @@ export function TabStrip({ state, pane, callbacks }: TabPanelProps): ReactNode {
         })}
         {stripIndex === pane.tabs.length && <div className={clsx(css.slot, css.slotCaret)} data-dockkit-caret={stripIndex} />}
       </div>
-      {callbacks.canAddTab(pane.id) && (
+      {callbacks.canAddTab(pane.id) && (callbacks.renderAddTab?.(pane.id, active) ?? (
         <Tooltip label={callbacks.labels.addTab} side="bottom" delayMs={500}>
           <button
             type="button"
@@ -362,7 +364,7 @@ export function TabStrip({ state, pane, callbacks }: TabPanelProps): ReactNode {
             <IconPlusOutlineRegular size={14} />
           </button>
         </Tooltip>
-      )}
+      ))}
       <div className={css.stripFill} data-dockkit-strip-fill />
       {!(callbacks.hideSplitWhenBlocked && block !== undefined) && (
         <Tooltip label={block === undefined ? callbacks.labels.splitPane : splitBlockedTitle(callbacks.labels, block)} shortcutKeys={callbacks.labels.splitPaneKeys} side="bottom" delayMs={500}>

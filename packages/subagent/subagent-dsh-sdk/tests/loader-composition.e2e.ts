@@ -163,7 +163,7 @@ describe('SDK subagent routing and diagnostics through the production profile', 
       expect(stderr).not.toContain('UNHANDLED')
       expect(toolResultText(events)).toBe(
         'Error: subagent run failed\n'
-        + 'Diagnostic: Subagent failure (provider: DSH SDK; stage: session-run; category: child-error)\n'
+        + 'Diagnostic: Subagent failure (provider: Tracy SDK; stage: session-run; category: child-error)\n'
         + 'Partial output before the run ended:\npartial child loader answer',
       )
     } finally {

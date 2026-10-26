@@ -81,6 +81,58 @@ describe('Input', () => {
 })
 
 describe('Menu', () => {
+  it('keeps a long site list scrollable and its submenu outside the scroll clip', () => {
+    const onSelect = vi.fn()
+    const onClose = vi.fn()
+    render(<Menu open portal collisionAvoidance anchor={<button>Sites</button>} onSelect={onSelect} onClose={onClose}
+      items={Array.from({ length: 60 }, (_, index) => ({ id: `site-${index}`, label: `Site ${index}`,
+        submenu: [{ id: `team-${index}`, label: `Team ${index}` }] }))} />)
+    const menu = screen.getByRole('menu')
+    expect(menu.className).toMatch(/scrollable/)
+    fireEvent.focus(screen.getByRole('menuitem', { name: 'Site 59' }))
+    const team = screen.getByRole('menuitem', { name: 'Team 59' })
+    expect(team.closest('div[class*="viewport"]')).toBeNull()
+    expect(menu.contains(team)).toBe(true)
+    fireEvent.pointerDown(team)
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.click(team)
+    expect(onSelect).toHaveBeenCalledWith('team-59')
+  })
+  it('enters a portaled submenu with Right and returns to its parent with Left', () => {
+    render(<Menu open collisionAvoidance anchor={<button>Sites</button>} onClose={() => {}}
+      items={[{ id: 'a', label: 'Site A', selectable: true, submenu: [{ id: 'team', label: 'Team' }] },
+        { id: 'b', label: 'Site B' }]} />)
+    const parent = screen.getByRole('menuitem', { name: 'Site A' })
+    act(() => { parent.focus() })
+    fireEvent.keyDown(parent, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Team' }))
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowLeft' })
+    expect(document.activeElement).toBe(parent)
+  })
+  it('keeps a submenu inside the viewport by placing it left of a row at the right edge', () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(180)
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(120)
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(820, 100, 180, 28))
+    render(<Menu open collisionAvoidance anchor={<button>Sites</button>} onClose={() => {}}
+      items={[{ id: 'site', label: 'Site', submenu: [{ id: 'team', label: 'Team' }] }]} />)
+    fireEvent.focus(screen.getByRole('menuitem', { name: 'Site' }))
+    const submenu = screen.getByRole('menuitem', { name: 'Team' }).parentElement!
+    expect(submenu.style.left).toBe('-190px')
+    expect(submenu.style.top).toBe('0px')
+    vi.restoreAllMocks()
+  })
+
+  it('can activate a parent row while keeping its submenu available on hover', () => {
+    const onSelect = vi.fn()
+    render(<Menu open anchor={<button>Sites</button>} onClose={() => {}} onSelect={onSelect}
+      items={[{ id: 'site', label: 'Site', selectable: true, submenu: [{ id: 'team', label: 'Team' }] }]} />)
+    const parent = screen.getByRole('menuitem', { name: 'Site' })
+    fireEvent.mouseEnter(parent)
+    expect(screen.getByRole('menuitem', { name: 'Team' })).toBeDefined()
+    fireEvent.click(parent)
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith('site')
+  })
+
   const items = [
     { id: 'a', label: 'Alpha' },
     { id: 'b', label: 'Beta', disabled: true },
@@ -501,6 +553,16 @@ describe('Menu', () => {
     const menu = screen.getByRole('menu')
     // side=bottom, align=start: below the host-supplied rect, left-aligned.
     expect(menu.style.left).toBe('40px')
+    expect(menu.style.top).toBe('132px')
+  })
+
+  it('flips a bottom menu to the trigger end when its measured width cannot fit on the right', () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(240)
+    const rect = new DOMRect(968, 100, 32, 28)
+    render(<Menu portal open collisionAvoidance anchor={null} getAnchorRect={() => rect}
+      items={items} onClose={() => {}} />)
+    const menu = screen.getByRole('menu')
+    expect(menu.style.left).toBe('760px')
     expect(menu.style.top).toBe('132px')
   })
 

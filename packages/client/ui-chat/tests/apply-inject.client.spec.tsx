@@ -162,6 +162,28 @@ describe('Chat inject API', () => {
     }
   })
 
+  it('serves client-local rows through ctx.chatLocal: the view hook reads the same list, tailSeq reads the log', async () => {
+    const b = await bench()
+    try {
+      const { injected } = b.chatViewApi(b.rootReference)
+      const local = b.runtime.ctx.chatLocal.for(ROOT)
+      expect(injected.hooks.localRows).toBe(local.nodes)
+      expect(local.tailSeq()).toBe(-1)
+      b.runtime.ctx.uiConversation.binding(b.rootReference.binding).activate('chat')
+      await b.runtime.sessions.replaceEvents(ROOT, [
+        { type: 'event', event: { type: 'turn/start', seq: SessionSeq(10), time: 10, data: { turn: 1 } } },
+        { type: 'event', event: { type: 'step/start', seq: SessionSeq(11), time: 11, data: { turn: 1, step: 1 } } },
+      ])
+      await vi.waitFor(() => { expect(local.tailSeq()).toBeGreaterThan(-1) })
+      // A local row is not a log row: it moves nothing the log reports.
+      const tail = local.tailSeq()
+      local.upsert({ id: 'q', kind: 'unknown', anchorSeq: tail + 100, data: {} } as never)
+      expect(local.tailSeq()).toBe(tail)
+    } finally {
+      await b.runtime.dispose()
+    }
+  })
+
   it('loads older history and forks through the Session Controller', async () => {
     const b = await bench()
     const { injected } = b.chatViewApi(b.rootReference)

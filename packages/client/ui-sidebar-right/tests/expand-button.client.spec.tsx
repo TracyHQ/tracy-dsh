@@ -32,14 +32,21 @@ function hookOf<T>(inst: { subscribe: (fn: () => void) => () => void; getSnapsho
   }
 }
 
-/** Mount the button over its real store and an empty shortcut catalog. */
-function mountButton(shortcuts: readonly ShortcutCatalogEntry[] = []) {
-  const instance = createSidebarRightStore(() => ({ kind: 'guide', title: 'Start' })).create()
+/**
+ * Mount the button over its real store, an optional shortcut catalog, and
+ * `doors` guide entries (Tracy: with none the button is not offered).
+ */
+function mountButton(shortcuts: readonly ShortcutCatalogEntry[] = [], doors = 1) {
+  const instance = createSidebarRightStore(() => ({ kind: 'guide', title: 'Start' }), () => doors > 0).create()
+  // The registry's guide entries, as the seat injects them: `doors` of them.
+  const entries = Array.from({ length: doors }, (_, i) => ({ kind: `k${i}` }))
   const props: ExpandButtonProps = {
     ...standard,
     useShortcuts: <T,>(selector: (entries: readonly ShortcutCatalogEntry[]) => T): T => selector(shortcuts),
     sessionId: SESSION,
     useStore: hookOf(instance),
+    // Only `length` is read; the box shape is the guide's concern.
+    useGuideEntries: hookOf({ subscribe: () => () => {}, getSnapshot: () => entries as never }),
     actions: instance.actions,
     // Copy is the dictionary's contract; the key stands in for the translation.
     t: (key: string) => key,
@@ -50,6 +57,14 @@ function mountButton(shortcuts: readonly ShortcutCatalogEntry[] = []) {
 }
 
 describe('ExpandButton', () => {
+  // The button's one job is to open the column. With no doors registered the
+  // column has nothing to open onto — the store refuses the expansion — so the
+  // button that would ask for it is not offered either.
+  it('is not offered while the registry has no doors', () => {
+    const { control } = mountButton([], 0)
+    expect(control()).toBeNull()
+  })
+
   it('advertises the configured expand binding', async () => {
     const { control, view } = mountButton([{ id: 'sidebar.right.toggle' as never, label: 'Toggle', aliases: [],
       binding: null, keys: ['Ctrl', 'B'], aria: 'Control+B', modified: true, conflicts: [], issue: null }])

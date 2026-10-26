@@ -44,3 +44,20 @@
      a font-relative amount, so it holds across the font axis. */
   vertical-align: -0.125em;
 }
+
+/* A fenced-block fold (user-text-folds.ts) draws the plain `.refChip`; a
+   plugin may dress it further by its `data-fold` attribute. Its optional
+   glyph rides the text size like `.refIcon`. */
+.foldIcon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-right: 4px;
+  vertical-align: -0.125em;
+}
+
+.foldIcon > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}

@@ -52,7 +52,7 @@ This table connects model-visible tool names to the plugin package and service s
 
 ### `plugin_manager`
 
-List plugins or bundles in the current profile, enable or disable them, install a bundle, or remove an installed bundle. Every action requires danger-full-access permission or approval for this call. Approval does not change the session permission mode. Changes affect every session in this profile. List first to obtain exact identifiers. Package installation can execute allowed build scripts. Live profiles apply changes immediately; startup profiles require restart. Incompatible DSH peer dependencies block installation and activation. Version exemptions risk crashes and data loss: warn the user and obtain explicit permission for the exact plugin and runtime versions before granting one.
+List plugins or bundles in the current profile, enable or disable them, install a bundle, or remove an installed bundle. Every action requires danger-full-access permission or approval for this call. Approval does not change the session permission mode. Changes affect every session in this profile. List first to obtain exact identifiers. Package installation can execute allowed build scripts. Live profiles apply changes immediately; startup profiles require restart. Incompatible Tracy peer dependencies block installation and activation. Version exemptions risk crashes and data loss: warn the user and obtain explicit permission for the exact plugin and runtime versions before granting one.
 
 ```json
 {
@@ -82,7 +82,7 @@ List plugins or bundles in the current profile, enable or disable them, install 
     },
     "runtimeVersion": {
       "type": "string",
-      "description": "For set_version_exemption: exact DSH version from list_version_exemptions. Target must be the manifest package-name@version, not an alias or version range."
+      "description": "For set_version_exemption: exact Tracy runtime version from list_version_exemptions. Target must be the manifest package-name@version, not an alias or version range."
     },
     "acceptRisk": {
       "type": "boolean",
@@ -498,6 +498,10 @@ Ask the user a concise question when you need confirmation, a choice, or missing
           "multi_select": {
             "type": "boolean",
             "description": "Whether the user may select more than one option. Defaults to false."
+          },
+          "recommended": {
+            "type": "string",
+            "description": "Label of the option you would pick yourself; it is shown as the default. It must equal one option's label exactly; do not add a suffix such as \"(Recommended)\" to labels."
           }
         },
         "required": [

@@ -1,4 +1,4 @@
-You are an AI agent powered by DeepSeek Harness.
+You are an AI agent powered by Tracy Cowork.
 
 Echo where you run.
 

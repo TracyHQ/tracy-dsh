@@ -181,6 +181,34 @@ export const InputBar = memo(function InputBar({
     focusDraftEditor(editor, revealSelection)
   }, [locked, sessionId, editor])
 
+  // While a `/` line is judged or its command runs the surface renders read-only (the draft stays
+  // visible), and the browser drops the keyboard from a contenteditable that turns read-only. Give
+  // it back when the machine settles — but only if it was lost to that, and nothing else took it
+  // meanwhile: a plain message never freezes the surface, and a control the person moved to keeps it.
+  const busyNow = useRef(machineBusy)
+  busyNow.current = machineBusy
+  const keyboardLostToBusy = useRef(false)
+  useEffect(() => {
+    const root = editor?.getRootElement()
+    if (root === null || root === undefined) return
+    const lost = (event: FocusEvent): void => {
+      if (busyNow.current && event.relatedTarget === null) keyboardLostToBusy.current = true
+    }
+    const regained = (): void => { keyboardLostToBusy.current = false }
+    root.addEventListener('focusout', lost)
+    root.addEventListener('focusin', regained)
+    return () => {
+      root.removeEventListener('focusout', lost)
+      root.removeEventListener('focusin', regained)
+    }
+  }, [editor])
+  useEffect(() => {
+    if (machineBusy || locked || editor === null || !keyboardLostToBusy.current) return
+    keyboardLostToBusy.current = false
+    const holder = document.activeElement
+    if (holder === null || holder === document.body) focusDraftEditor(editor, revealSelection)
+  }, [machineBusy])
+
   // A persisted draft arrives AFTER the unlock effect: DefaultConversationViews
   // adopts it in its own mount effect, and a parent's mount effect runs after
   // its children's. Reveal when the draft becomes non-empty so a restored long
@@ -303,7 +331,12 @@ export const InputBar = memo(function InputBar({
   const primaryStops = running && subagent === null && (empty || blocked !== undefined)
   // Disabled native buttons may omit mouseleave; their tooltip must close from state.
   const primaryDisabled = primaryStops ? stop === undefined : empty || disabled || machineBusy || uploadsPending
-  const interruptible = running && continuable
+  // Tracy: Stop stays on screen while the person types. With a draft the primary turns into Queue Send and
+  // the only Stop left was Esc Esc, so someone who had sent a wrong request and begun the next one had no
+  // button to stop it with. The independent Stop is drawn whenever the primary is not Stop itself: beside
+  // a continuable child's Send, and beside an ordinary session's Send once there is a draft. A one-shot
+  // child (`subagent !== null`, not continuable) still never exposes Stop.
+  const interruptible = running && (continuable || (subagent === null && !primaryStops))
   const primarySubmitMode = resolveSubmitMode(busyEnter, running, 'enter', steeringAvailable)
   const plainMessageDraft = !empty && input?.phase === 'plain' && !draft.trimStart().startsWith('/')
   const primaryLabel = primaryStops

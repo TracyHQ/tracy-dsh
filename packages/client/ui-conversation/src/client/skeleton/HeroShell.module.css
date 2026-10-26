@@ -153,6 +153,10 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  /* A flex item's automatic minimum is its min-content — the whole
+     unbreakable label — so without this the ellipsis below never engages
+     and a narrow Conversation pushes the row's trailing seats out. */
+  min-width: 0;
   max-width: min(100%, 360px);
   min-height: 28px;
   padding: 0 8px;

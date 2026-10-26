@@ -901,6 +901,40 @@ describe('running and lock semantics', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
+  it('Tracy: a running ordinary session keeps a Stop button beside Queue Send while a draft is typed', () => {
+    const { textarea, button, stop, sink, shell, view } = bench({ running: true })
+    const stopButtons = () => view.container.querySelectorAll<HTMLButtonElement>('button[aria-label="停止生成"]')
+    // Empty draft: the primary IS Stop, and there is exactly one.
+    expect(stopButtons()).toHaveLength(1)
+    expect(stopButtons()[0]).toBe(button)
+
+    writeDraft(shell, '排队消息')
+    // A draft: the primary is Queue Send, and a separate Stop is on screen.
+    expect(button.getAttribute('aria-label')).toBe('排队发送')
+    expect(stopButtons()).toHaveLength(1)
+    expect(stopButtons()[0]).not.toBe(button)
+    expect(stopButtons()[0]!.disabled).toBe(false)
+    fireEvent.click(stopButtons()[0]!)
+    expect(stop).toHaveBeenCalledTimes(1)
+    // Stopping neither sends nor discards what was typed.
+    expect(sink).not.toHaveBeenCalled()
+    expect(shell.snapshot.draft).toBe('排队消息')
+    expect(textarea.getAttribute('aria-disabled')).not.toBe('true')
+
+    // Clearing the draft puts Stop back as the primary: still exactly one.
+    writeDraft(shell, '')
+    expect(button.getAttribute('aria-label')).toBe('停止生成')
+    expect(stopButtons()).toHaveLength(1)
+    expect(stopButtons()[0]).toBe(button)
+  })
+
+  it('Tracy: an idle session never draws Stop, with or without a draft', () => {
+    const { shell, view } = bench({ running: false })
+    expect(view.container.querySelector('button[aria-label="停止生成"]')).toBeNull()
+    writeDraft(shell, '草稿')
+    expect(view.container.querySelector('button[aria-label="停止生成"]')).toBeNull()
+  })
+
   it('running Send follows the busy-state Steer preference and labels the delivery', () => {
     const { button, sink } = bench({ running: true, busyEnter: 'steer', draft: '按钮插话' })
     expect(button.getAttribute('aria-label')).toBe('插话发送')

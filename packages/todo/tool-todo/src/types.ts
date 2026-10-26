@@ -27,14 +27,28 @@ export interface TodoItem {
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
-    /** Whole-list snapshot; latest write wins on replay. Log-only UI state; never derived history. */
-    'todo/write': { todos: TodoItem[] }
+    /**
+     * Whole-list snapshot; latest write wins on replay. Log-only UI state; never derived history.
+     * `by: 'agent'` marks a list the agent wrote through `todo_write` (Tracy fork); a list another
+     * writer appends — a host-driven site build reporting its stages — carries no `by`.
+     */
+    'todo/write': { todos: TodoItem[]; by?: 'agent' }
   }
+}
+
+/**
+ * Internal fold state of the `todos` projection: the current list plus whether the agent wrote it.
+ * Only the agent's own plan is settled when its turn ends — a host-written list keeps reporting
+ * work that runs outside any turn.
+ */
+export interface TodoPlanState {
+  todos: TodoItem[]
+  byAgent: boolean
 }
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
-    todos: TodoItem[] | null
+    todos: TodoPlanState | null
   }
   interface SessionProjectionMap {
     /**

@@ -21,6 +21,7 @@ import { AppearanceRow } from './AppearanceRow.tsx'
 import type { FontSizeRowInjected } from './FontSizeRow.tsx'
 import { FontSizeRow } from './FontSizeRow.tsx'
 import { createAppearanceRowStore, createFontSizeRowStore } from './settings-store.ts'
+import { readLocalThemeSettings, writeLocalThemeSettings } from '../local-preference.ts'
 import { installThemeStyles } from './styles.ts'
 import { en, zh, type ThemeKey } from './locales.ts'
 import {
@@ -159,6 +160,8 @@ const BUILTIN_INSPECT_TOKENS: readonly ThemeTokenInspection[] = Object.freeze([
 export class ThemeRuntime {
   private readonly ctx: ClientContext
   private readonly host: ConfigForm<ThemeSettings>
+  /** Memory-mode (remote) pages persist the choice in this browser's localStorage. */
+  private readonly local: boolean
   private themes: ThemeDefinition[] = [...BUILTIN_THEMES]
   private preference: ThemePreference
   private fontSize: number = bootstrapFontSize()
@@ -178,6 +181,12 @@ export class ThemeRuntime {
     this.ctx = ctx
     this.host = host
     this.preference = DEFAULT_PREFERENCE
+    this.local = host.getSnapshot().mode === 'memory'
+    if (this.local) {
+      const stored = readLocalThemeSettings()
+      this.preference = stored.preference ?? this.preference
+      this.fontSize = stored.fontSize ?? this.fontSize
+    }
     // Non-browser runs (node e2e booting the client tree) have no matchMedia.
     this.media = typeof matchMedia === 'undefined' ? undefined : matchMedia('(prefers-color-scheme: dark)')
     this.snapshot = this.buildSnapshot()
@@ -236,6 +245,7 @@ export class ThemeRuntime {
     if (this.preference === id) return
     this.preference = id as ThemePreference
     if (isThemePreference(id)) void this.host.set(THEME_PREFERENCE_FIELD, id)
+    this.persistLocally()
     this.publish()
   }
 
@@ -252,7 +262,15 @@ export class ThemeRuntime {
     if (this.fontSize === px) return
     this.fontSize = px
     void this.host.set(FONT_SIZE_FIELD, px)
+    this.persistLocally()
     this.publish()
+  }
+
+  /** In memory mode, store the built-in preference and font size for this browser's next load. */
+  private persistLocally(): void {
+    if (!this.local) return
+    const preference = isThemePreference(this.preference) ? this.preference : DEFAULT_PREFERENCE
+    writeLocalThemeSettings({ preference, fontSize: this.fontSize })
   }
 
   /** Adopt the scope's accepted durable preference without writing it back. */

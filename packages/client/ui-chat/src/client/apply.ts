@@ -6,13 +6,14 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { SessionBinding } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { GroupKey } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { createSnapshotStore, type ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
+import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-browser/client'
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 // The `file` entry of `SidebarRightResourceParamsMap`, which types `{ params: { line } }` below.
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client'
-import { fileAddressFor } from '@deepseek-ai/dsh-util-workspace-path'
+import { fileAddressFor, resolveWorkspacePath } from '@deepseek-ai/dsh-util-workspace-path'
 // Type-only service and declaration merges used by the apply world.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -34,6 +35,8 @@ import { registerConversationNodes } from './conversation-nodes/register.ts'
 import { QuotaNoticeHost } from './chat/QuotaNoticeHost.tsx'
 import { en, NS, zh } from './locale.ts'
 import { TranscriptViewRow, type TranscriptViewRowInjected } from './settings/TranscriptViewRow.tsx'
+import { createChatLocal } from './chat-local.ts'
+import { bindLocalAnswerActions } from './chat/LocalAnswerActions.tsx'
 import { createChatStore } from './stores.ts'
 import { TranscriptViewPolicy } from './transcript-view.ts'
 import { derivePresentationPolicy } from './presentation-policy.ts'
@@ -53,10 +56,19 @@ const CHAT_NODE_INJECT: ChatNodeInjected = {
   },
 }
 
-/** Services required by the Chat target and its presentation registrations. */
+/**
+ * Services required by the Chat target and its presentation registrations.
+ *
+ * `sidebarRight` is NOT among them (Tracy, 0.1.5-alpha.1-tracy.2): upstream
+ * requires it, so a profile that stands the right Sidebar down — Tracy's
+ * does, its side card is dsh-better-sidebar — never activates the chat and
+ * boots to a blank page. It is read with `ctx.get` at the two call sites
+ * that want it; the file open falls back to the pre-0.1.5 funnel and the
+ * external link to a new browser tab.
+ */
 export const inject = [
   'slots', 'sessions', 'uiWorkspace', 'uiSession', 'uiConversation', 'locale',
-  'configForms', 'remote', 'remote.session', 'sidebarRight',
+  'configForms', 'remote', 'remote.session',
 ]
 
 /**
@@ -109,13 +121,37 @@ export function apply(ctx: Context): void {
     return source
   }
   registerConversationNodes(ctx)
+  // Client-local rows (Tracy): plugins draw rows that are not in the session log.
+  /**
+   * Branch a session at one durable event and open the child; the footer
+   * branch of a turn tail, a settled command and a local answer all land here.
+   * @param messageId - the closing assistant message, for analytics, when the cut is a turn end.
+   */
+  const forkSessionAt = (sessionId: SessionId, seq: number, messageId?: MessageId): void => {
+    ctx.sessions.fork({ sessionId, atSeq: seq, increaseTitle: true, onCreated: (childId) => {
+      ctx.get('productAnalytics')?.track('branch_session_click', { session_id: childId, parent_session_id: sessionId, ...messageId === undefined ? {} : { parent_message_id: messageId }, click_position: 'footer' })
+    } })
+      .then((childId) => { ctx.uiWorkspace.openSession(childId) })
+      .catch(() => {
+        // Fork or child-title failure leaves the source view unchanged.
+      })
+  }
+  const t = ctx.locale.bind(NS)
+  const chatLocal = createChatLocal((sessionId) => {
+    const binding = ctx.sessions.binding(sessionId)
+    return binding === undefined ? undefined : chatSource(binding).getSnapshot()
+  }, bindLocalAnswerActions({
+    t,
+    locale: ctx.locale,
+    forkAt: (sessionId, seq) => { forkSessionAt(sessionId, seq) },
+  }))
+  ctx.provide('chatLocal', chatLocal)
   ctx.uiSession.provide({
     hooks: ['chat'],
     resolve: binding => ({ hooks: { chat: chatSource(binding) } }),
   })
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-chat: dictionaries')
-  const t = ctx.locale.bind(NS)
   const chatStore = createChatStore()
   const chatScrollPositions = new Map<SessionId, ChatScrollPosition>()
   const chatSettings = ctx.configForms.get<ChatSettings>(CHAT_SETTINGS_NAMESPACE)
@@ -194,7 +230,11 @@ export function apply(ctx: Context): void {
         const chat = chatSource(binding)
         const conversation = ctx.uiConversation.binding(binding)
         return {
-          hooks: { presentation },
+          hooks: {
+            presentation,
+            textFolds: ctx.uiConversation.userTextFolds.source,
+            localRows: chatLocal.for(sessionId).nodes,
+          },
           keyedHooks: {
             chatNode: key => chat.getSnapshot().nodes.source(key),
             chatNodeProcess: key => chat.getSnapshot().nodes.processSource(key),
@@ -215,10 +255,22 @@ export function apply(ctx: Context): void {
           // to land.
           openFile: async (path, options) => {
             const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
-            const url = fileAddressFor(sessionId, cwd, path)
-            if (options?.line === undefined) ctx.sidebarRight.openResource(url)
-            else ctx.sidebarRight.openResource(url, { params: { line: options.line } })
-            await Promise.resolve()
+            const sidebarRight = ctx.get('sidebarRight')
+            if (sidebarRight !== undefined) {
+              const url = fileAddressFor(sessionId, cwd, path)
+              if (options?.line === undefined) sidebarRight.openResource(url)
+              else sidebarRight.openResource(url, { params: { line: options.line } })
+              await Promise.resolve()
+              return
+            }
+            // No right Sidebar in this profile: the 0.1.3 funnel. A side card
+            // that wraps `remote.session.openWorkspacePath` (dsh-better-sidebar
+            // does) takes the open from here; the line, which that funnel has
+            // no field for, is dropped rather than misdirected.
+            const result = await ctx.remote.session.openWorkspacePath({
+              path: resolveWorkspacePath(cwd, path),
+            })
+            if (!result.ok) throw new Error(`path open failed: ${result.error.message}`)
           },
           openSkill: (name) => {
             const scope = ctx.sessions.scope(sessionId)
@@ -226,8 +278,10 @@ export function apply(ctx: Context): void {
             ctx.get('inputTriggers')?.sessionOf(scope).openReference('skill', { ref: `/${name}` })
           },
           openExternalLink: (url) => {
-            if (linkOpening.getSnapshot() === 'sidebar' && ctx.get('sidebarRightTabs')?.get('browser') !== undefined) {
-              ctx.sidebarRight.openTab('browser', { params: { url } })
+            const sidebarRight = ctx.get('sidebarRight')
+            if (sidebarRight !== undefined && linkOpening.getSnapshot() === 'sidebar'
+              && ctx.get('sidebarRightTabs')?.get('browser') !== undefined) {
+              sidebarRight.openTab('browser', { params: { url } })
             } else {
               window.open(url, '_blank', 'noopener,noreferrer')
             }
@@ -247,14 +301,7 @@ export function apply(ctx: Context): void {
           },
           forkAt: (seq) => {
             const turn = [...chat.getSnapshot().timeline.turns.values()].find(turn => turn.end?.seq === seq)
-            const messageId = turn?.data.get('turn-tail')?.closing?.finalNode.messageId
-            ctx.sessions.fork({ sessionId, atSeq: seq, increaseTitle: true, onCreated: (childId) => {
-              ctx.get('productAnalytics')?.track('branch_session_click', { session_id: childId, parent_session_id: sessionId, ...messageId === undefined ? {} : { parent_message_id: messageId }, click_position: 'footer' })
-            } })
-              .then((childId) => { ctx.uiWorkspace.openSession(childId) })
-              .catch(() => {
-                // Fork or child-title failure leaves the source view unchanged.
-              })
+            forkSessionAt(sessionId, seq, turn?.data.get('turn-tail')?.closing?.finalNode.messageId)
           },
         }
       },

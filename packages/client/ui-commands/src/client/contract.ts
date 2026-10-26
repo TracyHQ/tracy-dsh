@@ -82,10 +82,29 @@ export interface PopupSelectSpec {
 export interface ActionSpec {
   readonly kind: 'action'
   /**
+   * Also claim an ARGUED line (`/name some text`): the whole line is consumed
+   * and `run` receives the text after the name, so the line never reaches the
+   * agent. A line carrying attachments is refused (draft and files stay).
+   * Tracy: a menu pick and Space after the name do not run it at once; they
+   * claim `/name ` in the composer like a host command with input, and Enter
+   * runs it with the text typed after the token.
+   * Absent: only the bare token is claimed, as before.
+   */
+  readonly takesText?: boolean
+  /**
+   * Tracy: the ghost hint the composer shows after a claimed `/name ` token while nothing is typed
+   * after it (only read with `takesText`). Read when the claim is made, so it follows the locale.
+   * @returns localized hint text; absent or empty shows none.
+   */
+  hint?(): string
+  /**
    * Run the action for one session.
    * @param session - the ClientSessionContext captured at invocation.
+   * @param text - the trimmed text after the command name; `''` for a bare
+   * invocation (bare Enter, a plain action's menu pick, or a claimed token
+   * submitted with nothing after it). Only ever non-empty with `takesText`.
    */
-  run(session: ClientSessionContext): void
+  run(session: ClientSessionContext, text?: string): void
 }
 
 /** The UI behavior of a contribution or decoration. */
@@ -101,6 +120,12 @@ export type CommandUiSpec = PopupSelectSpec | ActionSpec
 export interface CommandContribution {
   /** Command name without the leading slash (unique across contributions). */
   readonly name: string
+  /**
+   * Match the typed name case-insensitively (`/Help`, `/HELP` run `/help`).
+   * `name` must then be lower case; registration throws otherwise. Absent:
+   * the typed name must match exactly, as before.
+   */
+  readonly caseInsensitive?: boolean
   /** Localized menu row title; the name itself when absent. */
   label?(): string
   /** Localized menu row description; the row shows none when absent. */

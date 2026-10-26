@@ -111,6 +111,8 @@ async function bench(snapshot: ChatSnapshot) {
     views,
     groups: { register: () => () => {} },
     binding: () => ({ target: () => chat, snapshot: conversation }),
+    // Tracy: ui-chat reads the user-text fold registry (ledger "User-text folds").
+    userTextFolds: { source: createSnapshotStore([]) },
   } as never)
   ctx.uiSession.provide({
     hooks: ['conversation'],

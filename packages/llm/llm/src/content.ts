@@ -117,6 +117,15 @@ export function offloadedImageText(
 }
 
 /**
+ * Stable placeholder for an earlier image whose stored copy is gone.
+ * @param ref - durable reference whose object is missing or damaged.
+ * @returns model-visible note naming the image.
+ */
+export function unavailableImageText(ref: ImageAttachmentRef): string {
+  return `[image unavailable; ${imageIdentity(ref)}. Its stored copy is missing or damaged, so it is not shown; ask the user to attach it again if needed.]`
+}
+
+/**
  * True when typed model content contains an image block. This is the one image
  * walk shared by every image policy (capability gating, text-only
  * serialization, compaction survey), so a consumer cannot silently diverge.

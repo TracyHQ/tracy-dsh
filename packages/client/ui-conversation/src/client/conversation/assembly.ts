@@ -24,6 +24,7 @@ import { ConversationEventRegistry } from './event-registry.ts'
 import { HistoricalImageCache } from './historical-images.ts'
 import { ConversationViewRegistry } from './view-registry.ts'
 import { ConversationGroupRegistry } from './group-registry.ts'
+import { UserTextFoldRegistry } from './user-text-fold-registry.ts'
 
 /** Observable faces published for one Session's Conversation assembly. */
 export interface ConversationBinding {
@@ -190,6 +191,8 @@ export class UiConversation extends Service {
   readonly views: ConversationViewRegistry
   /** Business grouping rules over already materialized target Nodes. */
   readonly groups: ConversationGroupRegistry
+  /** Fenced-block folds every user-text projection applies (transcript, echo, queue). */
+  readonly userTextFolds: UserTextFoldRegistry
   private readonly bindings = new WeakMapWithValues<SessionBinding, BindingRecord>()
   private readonly images: HistoricalImageCache
 
@@ -202,6 +205,7 @@ export class UiConversation extends Service {
     this.events = new ConversationEventRegistry(ctx)
     this.views = new ConversationViewRegistry(ctx)
     this.groups = new ConversationGroupRegistry(ctx, this.views)
+    this.userTextFolds = new UserTextFoldRegistry(ctx)
     this.images = new HistoricalImageCache(ctx, sessions)
     const rebuild = (): void => {
       for (const record of this.bindings.values) record.binding.rebuild()

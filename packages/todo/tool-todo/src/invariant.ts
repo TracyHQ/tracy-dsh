@@ -38,62 +38,35 @@ function validateTodos(value: unknown, fail: InvariantFailure): void {
   }
 }
 
-/* jscpd:ignore-start -- package companions share replay and dispatch plumbing */
-/** Incremental turn state for one committed session log. */
-interface TurnTrace {
-  open: boolean
-}
-
-/** Advance the trace after one event has committed. */
-function advanceTrace(trace: TurnTrace, event: SessionEvent): void {
-  if (event.type === 'turn/start') trace.open = true
-  if (event.type === 'turn/end') trace.open = false
-}
-
-/** Validate one package-owned event against the preceding committed trace. */
-function validateEvent(event: SessionEvent, trace: TurnTrace, fail: InvariantFailure): void {
+/**
+ * Validate one package-owned event. Only the snapshot's shape is a durable
+ * rule: a `todo/write` may stand anywhere in the log, inside a turn or between
+ * two — the session core already admits standalone log-only events there, and
+ * a producer other than the model (a host plugin reporting a job it runs
+ * outside any turn) writes its list exactly then. (Tracy fork: upstream tied
+ * the snapshot to an open turn, which only the `todo_write` tool satisfies.)
+ */
+function validateEvent(event: SessionEvent, fail: InvariantFailure): void {
   if (event.type !== 'todo/write') return
   validateTodos(event.data.todos, fail)
-  if (!trace.open) fail('todo/write appended outside any open turn')
 }
 
-/** Validate one existing log in a single pass and return its tail trace. */
-function seedTrace(session: Session, fail: InvariantFailure): TurnTrace {
-  const trace: TurnTrace = { open: false }
+/** Validate one existing log in a single pass. */
+function seedSession(session: Session, fail: InvariantFailure): void {
   // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-  for (const event of session.snapshotEvents()) {
-    validateEvent(event, trace, fail)
-    advanceTrace(trace, event)
-  }
-  return trace
+  for (const event of session.snapshotEvents()) validateEvent(event, fail)
 }
 
 /** Install validation for loaded and newly appended whole-list todo snapshots. */
 const install: InvariantInstaller = Object.assign((ctx: Context, fail: InvariantFailure) => {
-  const traces = new WeakMap<Session, TurnTrace>()
-  const seed = (session: Session): void => {
-    traces.set(session, seedTrace(session, fail))
-  }
-  const traceFor = (session: Session): TurnTrace => {
-    let trace = traces.get(session)
-    if (trace === undefined) {
-      trace = seedTrace(session, fail)
-      traces.set(session, trace)
-    }
-    return trace
-  }
-  for (const session of ctx.sessions.list()) seed(session)
-  ctx.on('session/created', (session) => { seed(session) }, { global: true })
+  for (const session of ctx.sessions.list()) seedSession(session, fail)
+  ctx.on('session/created', (session) => { seedSession(session, fail) }, { global: true })
   ctx.on('internal/dispatch', (_mode, eventName, args) => {
     if (eventName !== 'session/event') return
-    const [session, event] = args as [Session, SessionEvent]
-    validateEvent(event, traceFor(session), fail)
-  }, { global: true })
-  ctx.on('session/event', (session, event) => {
-    advanceTrace(traceFor(session), event)
+    const [, event] = args as [Session, SessionEvent]
+    validateEvent(event, fail)
   }, { global: true })
 }, { inject: ['sessions'] })
-/* jscpd:ignore-end */
 
 /**
  * Register the todo invariant companion.

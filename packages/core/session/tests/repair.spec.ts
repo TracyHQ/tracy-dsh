@@ -171,7 +171,7 @@ describe.each(causes)('openTurnClosers (cause %o)', (cause) => {
     expect(result.type === 'tool/result' && result.data.message.content).toEqual([{
       type: 'text', text: cause.kind === 'forked'
         ? 'The history inherited by this branch has no record of this tool call starting. The parent session may have executed it after the fork point. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.'
-        : 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.',
+        : 'The tool call was interrupted before Tracy recorded it as started. Retry it if it is still needed.',
     }])
   })
 
@@ -404,7 +404,7 @@ describe('openTurnClosers model-visible wording', () => {
     [
       { kind: 'interrupted' } satisfies OpenTurnCloseCause,
       false,
-      'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.',
+      'The tool call was interrupted before Tracy recorded it as started. Retry it if it is still needed.',
     ],
     [
       { kind: 'interrupted' } satisfies OpenTurnCloseCause,

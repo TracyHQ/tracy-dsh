@@ -26,15 +26,77 @@ declare module '@deepseek-ai/cordis' {
 }
 
 import type {
-  AskUserQuestionAnswer, AskUserQuestionRequestEvent, PendingUserQuestion,
+  AskUserQuestionAction, AskUserQuestionAnswer, AskUserQuestionItem, AskUserQuestionRequestEvent, PendingUserQuestion,
 } from './types.ts'
 
 export type {
-  AskUserQuestionAnswer, AskUserQuestionAnswerItem, AskUserQuestionIntent, AskUserQuestionItem,
+  AskUserQuestionAction, AskUserQuestionAnswer, AskUserQuestionAnswerItem, AskUserQuestionIntent, AskUserQuestionItem,
   AskUserQuestionOption, PendingUserQuestion, SettledUserQuestion, UserQuestionProjectionView,
   UserQuestionState,
 } from './types.ts'
 export { isTimedAskUserQuestionSchema, TIMED_WAIT_PARAMETER } from './projection.ts'
+
+/**
+ * How an answer closed its request; an answerer that sets no `action` submitted it.
+ * @param answer - Answer returned by `ask()`.
+ * @returns The answer's action, `submit` when absent.
+ */
+export function answerAction(answer: AskUserQuestionAnswer): AskUserQuestionAction {
+  return answer.action ?? 'submit'
+}
+
+/** A trailing parenthetical on a label, such as " (Recommended)" or " (Đề xuất)". */
+const TRAILING_NOTE = /\s*[(\uFF08][^()\uFF08\uFF09]*[)\uFF09]\s*$/u
+
+/**
+ * A label as `recommended` is compared with it: Unicode-normalised, trimmed, case-folded, without
+ * a trailing parenthetical note, and with inner runs of white space collapsed.
+ * @param label - an option label, or the `recommended` value.
+ * @returns the comparable form.
+ */
+function comparableLabel(label: string): string {
+  return label.normalize('NFC').trim().replace(TRAILING_NOTE, '').replace(/\s+/gu, ' ').toLocaleLowerCase()
+}
+
+/**
+ * The option a `recommended` value means. Models restate a label rather than copy it: they add
+ * or drop the "(Recommended)" note (in any language), change case, or give only the label's
+ * opening words. Accepted, in this order and only when exactly one option qualifies: the label
+ * itself; the label equal after {@link comparableLabel}; the one label that starts with the
+ * value at a word boundary. Anything else — no option, or two — names none.
+ * @param recommended - the caller's value.
+ * @param labels - the question's option labels.
+ * @returns the exact label meant, or `undefined`.
+ */
+function recommendedLabel(recommended: string, labels: readonly string[]): string | undefined {
+  if (labels.includes(recommended)) return recommended
+  const wanted = comparableLabel(recommended)
+  if (wanted === '') return undefined
+  const equal = labels.filter(label => comparableLabel(label) === wanted)
+  if (equal.length > 0) return equal.length === 1 ? equal[0] : undefined
+  const prefixed = labels.filter((label) => {
+    const comparable = comparableLabel(label)
+    return comparable.startsWith(wanted) && /^[\s,;:.\-–—/]/u.test(comparable.slice(wanted.length))
+  })
+  return prefixed.length === 1 ? prefixed[0] : undefined
+}
+
+/**
+ * The question as answerers should see its `recommended`: unchanged when it is absent or names
+ * an option exactly, rewritten to the exact label when it means exactly one option
+ * ({@link recommendedLabel}), dropped otherwise.
+ * @param question - the caller's question.
+ * @returns the replacement question, or `undefined` when it is kept as is.
+ */
+function withResolvedRecommended(question: AskUserQuestionItem): AskUserQuestionItem | undefined {
+  const recommended = question.recommended
+  if (recommended === undefined) return undefined
+  const labels = (question.options ?? []).map(option => option.label)
+  const meant = recommendedLabel(recommended, labels)
+  if (meant === recommended) return undefined
+  const { recommended: _dropped, ...rest } = question
+  return meant === undefined ? rest : { ...rest, recommended: meant }
+}
 
 /** Request for a human answer. */
 export interface AskUserQuestionRequest extends AskUserQuestionRequestEvent {}
@@ -315,17 +377,34 @@ export class UserQuestionService extends TypertRemoteService {
           'BAD_INTENT')
       }
     }
+    // A `recommended` is a presentation hint: one that means exactly one option
+    // is rewritten to that option's exact label, so every UI matches it by
+    // equality; one that names none (or several) is dropped, so no UI
+    // pre-selects a choice that was never offered, and the question goes
+    // through either way. The request is copied only when something changed,
+    // so answerers otherwise keep seeing the caller's own objects.
+    let questions = request.questions
+    request.questions.forEach((question, index) => {
+      const resolved = withResolvedRecommended(question)
+      if (resolved === undefined) return
+      this.ctx.logger.debug(resolved.recommended === undefined
+        ? `question ${question.id}: recommended ${JSON.stringify(question.recommended)} names none of its options; dropped`
+        : `question ${question.id}: recommended ${JSON.stringify(question.recommended)} read as ${JSON.stringify(resolved.recommended)}`)
+      if (questions === request.questions) questions = [...request.questions]
+      questions[index] = resolved
+    })
+    const asked = questions === request.questions ? request : { ...request, questions }
     const noAnswerer = () => Promise.reject(new UserQuestionError(
       'no user-questions answerer accepted the request',
       'NO_PROVIDER',
     ))
     try {
       return await (agent === undefined
-        ? this.ctx.waterfall('user-questions/request', request, noAnswerer)
+        ? this.ctx.waterfall('user-questions/request', asked, noAnswerer)
         : this.ctx.waterfall(
           scopeTarget(agent, agent),
           'user-questions/request',
-          { ...request, agent },
+          { ...asked, agent },
           noAnswerer,
         ))
     } catch (error) {

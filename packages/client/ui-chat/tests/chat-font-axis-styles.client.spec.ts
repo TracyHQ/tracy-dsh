@@ -144,7 +144,8 @@ describe('chat flow font-size axis', () => {
     expect(css).toContain("[data-actions-reveal='hover']:hover .actions,")
     expect(css).toContain("[data-actions-reveal='hover']:focus-within .actions,")
     expect(css).toMatch(/\):focus-within \.actions \{\s*opacity: 1/)
-    expect(css).not.toContain("[data-actions-reveal='always']")
+    // Upstream has no rule for 'always'; Tracy's only ones take the seat back (tracy.42 block below).
+    expect(css.slice(0, css.indexOf('Tracy (tracy.42)'))).not.toContain("[data-actions-reveal='always']")
   })
 
   it('uses flow sibling selectors to reveal only the latest user-authored row', () => {
@@ -172,5 +173,32 @@ describe('chat flow font-size axis', () => {
       'font-size: 11px',
       'line-height: 18px',
     ]))
+  })
+})
+
+describe('Tracy (tracy.42) one row out: the last finished answer, until a new request', () => {
+  const css = read('MessageIconActions.module.css').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\s+/g, ' ')
+
+  it('takes an always row back to the hover reveal once a later exchange follows its flow item', () => {
+    for (const later of [
+      "[data-chat-flow-kind='user']", "[data-chat-flow-kind='steering']", "[data-chat-flow-kind='command']",
+      "[data-chat-flow-kind='manual-compaction']", "[data-chat-flow-kind='turn-tail']", '[data-submission-echo]',
+      '[data-pending-steering]', '[data-chat-exchange]',
+    ]) expect(css).toContain(later)
+    // A :has() nested in :has() is invalid and the browser drops it in silence (measured 12/10/2026: a later
+    // Help answer left the agent's row out). The later item must be matched by its own attributes.
+    const tracy = css.slice(css.indexOf(':is([data-chat-flow-kind], [data-chat-flow-key]):has(~'))
+    expect(tracy.slice(0, tracy.indexOf('{'))).not.toMatch(/:has\(~[^{]*:has\(/)
+    expect(css).toMatch(/:is\(\[data-chat-flow-kind\], \[data-chat-flow-key\]\):has\(~ :is\([^{]*\)\) \[data-actions-reveal='always'\] \.actions \{/)
+  })
+
+  it('does not look at the composer: typing leaves the row out, only a sent request moves it', () => {
+    expect(css).not.toContain('data-composer')
+  })
+
+  it('brings it back on hover or focus of the answer, and only on devices that hover', () => {
+    const media = css.slice(css.lastIndexOf('@media (hover: hover)'))
+    expect(media).toContain(":is(:hover, :focus-within) [data-actions-reveal='always'] .actions")
+    expect(media).toMatch(/\.actions \{ opacity: 1; \}/)
   })
 })

@@ -751,6 +751,81 @@ describe('subagent ownership fence', () => {
     }
     expect(followup).toHaveBeenCalledTimes(3)
   })
+
+  it('keeps who typed on the exact prompt, and refuses a prompter it cannot read', async () => {
+    // The Host has no notion of a person; a gate in front of it does, and stamps `prompter` onto
+    // the prompt body. Whatever arrives is copied onto the message's source verbatim, so the log
+    // says who typed each message for as long as the session lives.
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
+    const session = ctx.sessions.create(sid('session-prompter'), { meta: { cwd: '/proj' } })
+    const followup = vi.fn()
+    const agent = {
+      id: session.id, session, inbox: inboxFor(), status: 'idle', ctx, followup,
+    } as unknown as Agent
+    ctx.agents.register(agent)
+    const remote = createSessionTestRemote(ctx, {
+      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
+      cwd: '/tmp',
+    })
+
+    const stamped = promptRequest({
+      sessionId: agent.id,
+      mode: 'queue' as const,
+      content: [{ type: 'text' as const, text: 'signed work' }],
+      prompter: { user: 's3f1a2b3c4d5e6f7a8b9c0d1e2_ab12cd', email: 'bee@team.test' },
+    })
+    await expect(remote.prompt(stamped)).resolves.toMatchObject({ ok: true })
+    expect(followup).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      source: {
+        kind: 'user',
+        rpcId: stamped.requestId,
+        prompter: { user: 's3f1a2b3c4d5e6f7a8b9c0d1e2_ab12cd', email: 'bee@team.test' },
+      },
+    }))
+
+    // The master account of a gate has a name and no address.
+    const nameOnly = promptRequest({
+      sessionId: agent.id,
+      mode: 'queue' as const,
+      content: [{ type: 'text' as const, text: 'admin work' }],
+      prompter: { user: 'root', email: null },
+    })
+    await expect(remote.prompt(nameOnly)).resolves.toMatchObject({ ok: true })
+    expect(followup).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      source: { kind: 'user', rpcId: nameOnly.requestId, prompter: { user: 'root', email: null } },
+    }))
+
+    // No gate in front (a bare local Host): no prompter, and the source is exactly what it was.
+    const bare = promptRequest({
+      sessionId: agent.id,
+      mode: 'queue' as const,
+      content: [{ type: 'text' as const, text: 'headless work' }],
+    })
+    await expect(remote.prompt(bare)).resolves.toMatchObject({ ok: true })
+    expect(followup).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      source: { kind: 'user', rpcId: bare.requestId },
+    }))
+
+    // A stamp the Host cannot read is a bug upstream, not a person: refuse it out loud.
+    for (const prompter of [{ email: 'x@y.z' }, { user: '' }, { user: 'root', email: 'not-an-address' }, 'root', 7]) {
+      const invalid = await remote.prompt(promptRequest({
+        sessionId: agent.id,
+        mode: 'queue' as const,
+        content: [{ type: 'text' as const, text: 'bad stamp' }],
+        prompter: prompter as never,
+      }))
+      expect(invalid).toMatchObject({
+        ok: false,
+        error: {
+          code: 'session/invalid-prompter',
+          message: 'prompter must be { user: non-empty string, email?: address | null }',
+        },
+      })
+    }
+    expect(followup).toHaveBeenCalledTimes(3)
+  })
 })
 
 describe('degenerate composition (no persistence, no factory)', () => {

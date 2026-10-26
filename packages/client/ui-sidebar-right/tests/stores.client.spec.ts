@@ -16,8 +16,8 @@ import { pageAddress } from '../src/client/contract/seed.ts'
 
 const SESSION = 's-test'
 
-function harness() {
-  const instance = createSidebarRightStore(() => ({ kind: 'guide', title: 'Start' })).create()
+function harness(doors: { open: boolean } = { open: true }) {
+  const instance = createSidebarRightStore(() => ({ kind: 'guide', title: 'Start' }), () => doors.open).create()
   instance.actions.open(SESSION)
   const surface = () => {
     const held = instance.getSnapshot().bySession[SESSION]
@@ -35,6 +35,49 @@ function harness() {
   const expand = (): void => { instance.actions.setExpanded(SESSION, true) }
   return { instance, actions: instance.actions, surface, layout, entries, guide, expand }
 }
+
+describe('createSidebarRightStore — an expansion that would show nothing', () => {
+  // The settle rule keeps an expanded column from ever holding an empty pane
+  // by seeding the guide. With no doors registered that guide lists nothing,
+  // so the expansion would present a blank column: it is not performed, and
+  // nothing is recorded — the column stays collapsed, as an empty one may.
+  it('is not performed while the registry has no doors', () => {
+    const { actions, layout, entries } = harness({ open: false })
+    actions.setExpanded(SESSION, true)
+    expect(layout().expanded).toBe(false)
+    expect(Object.keys(layout().tabs)).toEqual([])
+    expect(entries()).toBe(0)
+    actions.toggleExpanded(SESSION)
+    expect(layout().expanded).toBe(false)
+  })
+
+  // Content is something to show whether or not the registry has doors: the
+  // composer's `/` and `@` open a preview through this path, and that open must
+  // still reveal the column.
+  it('still opens for content', () => {
+    const { actions, layout } = harness({ open: false })
+    actions.openContent(SESSION, {
+      kind: 'text', contentId: 'dsh-resource://file/session/s-test/a.txt', title: 'a',
+    }, () => {})
+    expect(layout().expanded).toBe(true)
+    expect(Object.values(layout().tabs).map(tab => tab.kind)).toEqual(['text'])
+  })
+
+  // A column that was expanded while doors existed keeps its seeded guide; once
+  // the doors are gone, that guide alone is nothing to show, and reopening the
+  // collapsed column is refused the same way an empty one is.
+  it('treats a lone seeded guide as nothing to show once the doors are gone', () => {
+    const doors = { open: true }
+    const { actions, layout, expand, guide } = harness(doors)
+    expand()
+    expect(layout().expanded).toBe(true)
+    expect(guide()).toBeDefined()
+    actions.setExpanded(SESSION, false)
+    doors.open = false
+    actions.setExpanded(SESSION, true)
+    expect(layout().expanded).toBe(false)
+  })
+})
 
 describe('createSidebarRightStore — the sequence', () => {
   it.each(['left', 'right'] as const)('splits one pane at its %s edge and records the tab move as one reversible intent', (zone) => {

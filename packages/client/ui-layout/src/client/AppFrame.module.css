@@ -1,6 +1,20 @@
+/* The tracks: sidebar | Conversation | right panel. The frame writes the
+   inputs (AppFrame.tsx frameTrackInputs); the right track is the rest of the
+   frame after the Conversation, which is clamped between --dsh-frame-chat-lo
+   and --dsh-frame-chat-hi (clamp() lets the floor win when they cross), so a
+   window resize is solved in the browser's own layout pass.
+   --dsh-frame-rightbar-track is 1 while the right panel takes a track, 0
+   otherwise: both states stay the same list of lengths, so toggling the panel
+   eases like any other track change. */
 .frame {
   position: relative; /* anchors the drag handles, which straddle column borders */
   display: grid;
+  grid-template-columns:
+    var(--dsh-frame-sidebar)
+    minmax(calc(var(--dsh-frame-chat-min) * var(--dsh-frame-rightbar-track)), 1fr)
+    minmax(0px, calc((100% - var(--dsh-frame-sidebar)
+      - clamp(var(--dsh-frame-chat-lo), var(--dsh-frame-chat), var(--dsh-frame-chat-hi)))
+      * var(--dsh-frame-rightbar-track)));
   grid-template-rows: 100%;
   height: 100%;
   overflow: hidden;
@@ -112,7 +126,8 @@
   --dsh-frame-chrome-top: 0px;
 }
 
-:global([data-platform='darwin']) .sidebarCol {
+:global([data-platform='darwin']) .sidebarCol,
+:global(html[data-platform='darwin'][data-desktop-chrome='integrated']) .frame {
   /* A blue wash over the top of the translucent tint, gone by a third of the
      column; a faint blue-grey-violet rises through the bottom third; and a
      faint blue cast is mixed into the tint itself. Every layer stays
@@ -131,7 +146,8 @@
 
 /* Dark drops the blue cast (the light-mode wash reads purple over dark fills)
    and thins the fill so more wallpaper shows; the washes stay. */
-:global([data-platform='darwin']) :global([data-ds-dark-theme]) .sidebarCol {
+:global([data-platform='darwin']) :global([data-ds-dark-theme]) .sidebarCol,
+:global(html[data-platform='darwin'][data-desktop-chrome='integrated']) :global([data-ds-dark-theme]) .frame {
   background:
     linear-gradient(
       to bottom,
@@ -149,7 +165,9 @@
    selector repeats so this outranks its thinner fill). */
 @media (prefers-reduced-transparency: reduce) {
   :global([data-platform='darwin']) .sidebarCol,
-  :global([data-platform='darwin']) :global([data-ds-dark-theme]) .sidebarCol {
+  :global([data-platform='darwin']) :global([data-ds-dark-theme]) .sidebarCol,
+  :global(html[data-platform='darwin'][data-desktop-chrome='integrated']) .frame,
+  :global(html[data-platform='darwin'][data-desktop-chrome='integrated']) :global([data-ds-dark-theme]) .frame {
     background: color-mix(in srgb, var(--dsw-specific-sidebar-fill) 90%, transparent);
   }
 }
@@ -169,8 +187,9 @@
 }
 
 /* The darwin closed sidebar has no rail: the centre reaches the window edge,
-   where a separator would draw a seam against nothing. */
-:global([data-platform='darwin']) [data-sidebar-collapsed] .centerCol {
+   where a separator would draw a seam against nothing. A kept rail
+   (html[data-desktop-sidebar-rail]) keeps the separator against it. */
+:global(html[data-platform='darwin']:not([data-desktop-sidebar-rail])) [data-sidebar-collapsed] .centerCol {
   border-left: none;
 }
 
@@ -180,7 +199,7 @@
    the frame's left edge — traffic lights to x 68, controls at x 88
    (28 + 8 + 28), then 8px of air. Main panels whose content reaches the
    top-left corner pad by this. */
-:global([data-platform='darwin']) .frame[data-sidebar-collapsed] {
+:global(html[data-platform='darwin']:not([data-desktop-sidebar-rail])) .frame[data-sidebar-collapsed] {
   --dsh-frame-leading-clearance: 160px;
 }
 
@@ -189,12 +208,70 @@
    only the controls (12 + 28 + 8 + 28 + 8). The 12px start matches the
    expanded sidebar strip's inline padding (ui-sidebar .topStrip), so
    collapsing never shifts the toggle. */
-:global([data-platform='darwin'][data-fullscreen]) .frame[data-sidebar-collapsed] {
+:global(html[data-platform='darwin'][data-fullscreen]:not([data-desktop-sidebar-rail])) .frame[data-sidebar-collapsed] {
   --dsh-frame-leading-clearance: 84px;
 }
 
 :global([data-platform='darwin'][data-fullscreen]) .leadingSeat {
   left: 12px;
+}
+
+/* Tracy fork — integrated chrome row (opt-in, macOS desktop). An embedding
+   shell whose own sidebar keeps an icon rail marks
+   <html data-desktop-chrome="integrated">: the window's top row — traffic
+   lights, the conversation header's title row, the right panel's tab strip —
+   reads as ONE strip on ONE tint, with no column border crossing it, and
+   everything below it sits on a card whose edge starts at the chrome height
+   (Cherry Studio's layout). Unlike the Windows caption mode above, nothing is
+   pushed down: each column keeps its own top row in place, only the paint
+   moves. The tint is the darwin sidebar tint (rules above), painted once by
+   the frame so the row has no seam between columns; the sidebar column goes
+   clear over it. ui-conversation (.root) and ui-dockkit (.tabHost, .tabStrip)
+   carry their halves under the same mark. */
+:global(html[data-platform='darwin'][data-desktop-chrome='integrated']) {
+  --dsh-chrome-height: 44px;
+  --dsh-content-radius: 12px;
+}
+
+:global(html[data-platform='darwin'][data-desktop-chrome='integrated']) .sidebarCol {
+  background: transparent;
+}
+
+/* The card: the column's base ground from the chrome height down, its
+   top-left corner rounded where the strip meets the content edge, a hairline
+   along its top and left so it reads on the tint in both themes. Drawn behind
+   the column's content (the column isolates, so -1 stays above the frame's
+   tint); the conversation root paints nothing in this mode, so the strip
+   above the card shows the tint. */
+:global(html[data-platform='darwin'][data-desktop-chrome='integrated']) .centerCol {
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+  border-left: none;
+}
+
+:global(html[data-platform='darwin'][data-desktop-chrome='integrated']) .centerCol::before {
+  content: '';
+  position: absolute;
+  inset: var(--dsh-chrome-height) 0 0 0;
+  z-index: -1;
+  box-sizing: border-box;
+  background: var(--dsw-alias-bg-base);
+  border-top: 0.5px solid var(--dsw-alias-border-l3);
+  border-left: 0.5px solid var(--dsw-alias-border-l3);
+  border-top-left-radius: var(--dsh-content-radius);
+  corner-shape: round;
+}
+
+/* The right track keeps its slide-time ground (the darwin rule above) only
+   under the strip, so the strip's tint runs on through it. */
+:global(html[data-platform='darwin'][data-desktop-chrome='integrated']) .rightbarCol {
+  background: linear-gradient(var(--dsw-alias-bg-base) 0 0) 0 var(--dsh-chrome-height) / 100% 100% no-repeat;
+}
+
+/* Column resize starts below the strip: there the strip drags the window. */
+:global(html[data-platform='darwin'][data-desktop-chrome='integrated']) .handle {
+  top: var(--dsh-chrome-height);
 }
 
 /* The frame declares no window drag of its own: every chrome row owns the drag
@@ -239,6 +316,22 @@
 /* Rides the same curve as the tracks so the pill stays on the moving border
    during collapse/expand; instant at steady state (viewport-driven moves)
    and while dragging. */
+/* The Conversation divider is keyboard-operable (role=separator): a focus
+   ring drawn as a line on the border, since the strip itself stays invisible. */
+.handle:focus-visible {
+  outline: none;
+}
+
+.handle:focus-visible::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(50% - var(--dsw-focus-ring-width) / 2);
+  width: var(--dsw-focus-ring-width);
+  background: var(--dsw-focus-ring-color);
+}
+
 .frame[data-animating] .handle {
   transition: left var(--ds-transition-duration-slow) var(--ds-ease-in-out);
 }

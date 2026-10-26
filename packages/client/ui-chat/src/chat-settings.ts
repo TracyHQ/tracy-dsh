@@ -29,7 +29,7 @@ const TRANSCRIPT_VIEW_SETTING_VALUES = [
 ] as const
 
 /** Default work details for non-Desktop Web clients. */
-export const DEFAULT_TRANSCRIPT_VIEW_MODE: TranscriptViewMode = 'detailed'
+export const DEFAULT_TRANSCRIPT_VIEW_MODE: TranscriptViewMode = 'compact'
 
 /** Performance and usage detail levels accepted by user settings. */
 export const PERFORMANCE_USAGE_MODES = ['compact', 'detailed'] as const
@@ -37,8 +37,8 @@ export const PERFORMANCE_USAGE_MODES = ['compact', 'detailed'] as const
 /** Performance and usage presentation. */
 export type PerformanceUsageMode = typeof PERFORMANCE_USAGE_MODES[number]
 
-/** Preserve detailed accounting for users without an explicit preference. */
-export const DEFAULT_PERFORMANCE_USAGE: PerformanceUsageMode = 'detailed'
+/** Compact accounting for users without an explicit preference (Tracy: token counts are noise on a customer site). */
+export const DEFAULT_PERFORMANCE_USAGE: PerformanceUsageMode = 'compact'
 
 /** Destinations for ordinary clicks on Chat HTTP(S) links. */
 export type LinkOpening = 'sidebar' | 'new-tab'

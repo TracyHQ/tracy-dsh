@@ -27,7 +27,9 @@ describe('native locale initialization', () => {
     const ctx = new Context()
     const host = stubConfigForm<LocaleSettings>()
     try {
-      const locale = new LocaleRuntime(ctx, host.scope, { languages: ['ja-JP', 'zh-Hant', 'en-US'], preference: null })
+      // Tracy: `zh-Hant` would now skip the Simplified pack, so the native order is pinned with
+      // a Simplified tag; the Traditional rule has its own spec in locale.client.spec.ts.
+      const locale = new LocaleRuntime(ctx, host.scope, { languages: ['ja-JP', 'zh-Hans', 'en-US'], preference: null })
       expect(locale.getSnapshot().active).toBe('zh')
       expect(host.set).not.toHaveBeenCalled()
       locale.setLocale('en')

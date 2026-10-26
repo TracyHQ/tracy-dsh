@@ -1,10 +1,15 @@
 /* The takeover seats where the input card sits, centered on the InputBar
    axis at the shared content width (input card - 32): sides = clearance +
-   16px so the relation also holds on narrow viewports. */
+   16px so the relation also holds on narrow viewports. The frame is the size
+   container of the compact rules below: the conversation column beside a
+   side panel is as narrow as 250px on a wide window, so the card sizes its
+   layout by this seat, never by the viewport. Anonymous on purpose (CSS
+   modules hash container names per module). */
 .frame {
   display: flex;
   justify-content: center;
   padding: 6px calc(var(--dsh-composer-side-clearance) + 16px) 10px;
+  container-type: inline-size;
 }
 
 /* Figma Input 973:36348 body over the 1019:36938 header: no banner strip —
@@ -107,11 +112,16 @@
   margin: 0 2px 8px;
 }
 
+/* Pushed to the end of its line, so when the footer wraps the actions take
+   their own row at the right edge instead of being clipped by the card. */
 .footerActions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 12px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 .pager {
@@ -421,11 +431,15 @@
   border-color: var(--dsw-alias-state-business-primary);
 }
 
+/* Pager, feedback and actions need about 260px on one line; a narrower card
+   wraps the actions to a second line (the card clips overflow, so a row that
+   cannot wrap hides the primary action). */
 .footer {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   flex-shrink: 0;
   margin-top: 12px;
   padding: 0 10px 0 18px;
@@ -440,7 +454,7 @@
   text-align: right;
 }
 
-@media (max-width: 720px) {
+@container (max-width: 720px) {
   .card {
     border-radius: var(--dsw-radius-xl);
   }
@@ -470,6 +484,31 @@
 
   .footerActions {
     flex-shrink: 0;
+  }
+}
+
+/* The narrowest seats (a conversation column of 250-480px): the 32px the
+   frame keeps on each side to line the card up with the input card is width
+   the options cannot spare, and the 60vh cap leaves room for about one option
+   under a title that wraps to four lines. Collapsing the card to its header
+   remains the way back to the conversation above. The card spends the
+   frame's extra 16px per side through negative margins: a container query
+   cannot restyle the container (.frame) itself. */
+@container (max-width: 480px) {
+  .card {
+    width: calc(100% + 32px);
+    max-width: none;
+    max-height: min(75vh, 520px);
+    margin-inline: -16px;
+  }
+
+  .header {
+    gap: 8px;
+    padding: 10px 8px 0 14px;
+  }
+
+  .options {
+    padding: 4px 4px;
   }
 }
 

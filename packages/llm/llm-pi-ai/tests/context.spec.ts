@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
+import { AttachmentError, AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type {
   AttachmentStore,
   ImageAttachmentRef,
@@ -365,6 +365,30 @@ describe('pi-ai request context conversion', () => {
     expect(readImageRequest).toHaveBeenCalledTimes(1)
     expect(readImageRequest.mock.calls[0]?.[0]).toEqual(recent)
   })
+  it('sends a note in place of an earlier image whose stored copy is gone', async () => {
+    const lost = { ...ref, attachmentId: AttachmentId(`sha256:${'e'.repeat(64)}`), name: 'open-page.jpg' }
+    const readImageRequest = vi.fn((value: ImageAttachmentRef) => value.attachmentId === lost.attachmentId
+      ? Promise.reject(new AttachmentError('Attachment object is missing.', 'ATTACHMENT_NOT_FOUND'))
+      : Promise.resolve(requestImage(value, Uint8Array.of(1))))
+
+    const context = await toPiContext(request([
+      user([{ type: 'image', attachment: lost }]),
+      history('assistant', [{ type: 'text', text: 'seen' }]),
+      user([{ type: 'text', text: 'next' }, { type: 'image', attachment: ref }]),
+    ]), imageContext(projectionStore(readImageRequest)))
+
+    expect(context.messages[0]).toMatchObject({ role: 'user', content: expect.stringContaining('image unavailable') as string })
+    expect(JSON.stringify(context.messages[0])).toContain('open-page.jpg')
+    expect(context.messages[2]).toMatchObject({ role: 'user', content: [{ type: 'text' }, { type: 'text' }, { type: 'image' }] })
+  })
+
+  it('fails with ATTACHMENT_MISSING when an image of the latest user message cannot be read', async () => {
+    const readImageRequest = vi.fn(() => Promise.reject(new AttachmentError('Attachment object is missing.', 'ATTACHMENT_NOT_FOUND')))
+
+    await expect(toPiContext(request([user([{ type: 'image', attachment: ref }])]), imageContext(projectionStore(readImageRequest))))
+      .rejects.toMatchObject({ code: 'ATTACHMENT_MISSING', failure: { code: 'ATTACHMENT_MISSING' } })
+  })
+
   it('fails with the count to offload when exact encoded bytes exceed the bound', async () => {
     const sized: ImageAttachmentRef = { ...ref, bytes: 3 }
     const readImageRequest = vi.fn((value: ImageAttachmentRef) => Promise.resolve({

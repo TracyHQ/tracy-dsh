@@ -8,6 +8,13 @@ export const LOCALE_SETTINGS_NAMESPACE = 'locale'
 /** Field carrying an explicit locale selection; absence delegates to the browser. */
 export const LOCALE_PREFERENCE_FIELD = 'preference'
 
+/**
+ * localStorage key holding a remote page's language choice. Non-loopback pages
+ * run settings forms in memory mode and never write the Host document, so the
+ * choice persists per browser here instead (same model as `dsh.ui-theme.v1`).
+ */
+export const LOCALE_LOCAL_STORAGE_KEY = 'dsh.locale.v1'
+
 /** Accepted BCP 47-style language ids. */
 export const LOCALE_ID_PATTERN = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/u
 

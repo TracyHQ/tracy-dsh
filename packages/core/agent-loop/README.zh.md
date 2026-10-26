@@ -126,6 +126,8 @@ const handle = await ctx.agents.create({
 
 最终适配器选择、分发与迭代失败以终止结束的形式到达并进入 `agent/request-error`；处理该失败的监听器返回 `{ kind: 'retry' }` 且不调用 `next()`，未被处理的失败则是终态。Middleware、结果处理、工具及其他扩展失败仍会抛出并直接关闭轮次——插件失败结束的是轮次，不是循环。取消后未分发的模型工具调用会收到合成的 `tool/call` 加 `ABORTED_BEFORE_DISPATCH` 结果对。[显式取消决策](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.zh.md)拥有信号生命周期。
 
+首次尝试接纳用户消息之前发生的失败——抛错的 `agent/pre-step` 或 `agent/request` 监听器、提示词组装或 `prepareCall()`——会把已认领且 `source.kind` 为 `user` 的消息放回各自原待处理列表的队首，下一次唤醒输入只发送它们一次。插件产生的输入与子代理会话的所有消息随该步骤丢弃，取消不放回任何消息（`tests/claimed-input-recovery.spec.ts`）。
+
 关闭失败步骤之前，驱动器为每个尚无结果的 assistant 工具调用记录错误结果。已有 `tool/call` 记录但尚无已提交结果的调用获得 `TOOL_OUTCOME_UNKNOWN`；没有调用记录的请求获得 `TOOL_NOT_STARTED`。已提交的结果保持完整，已启动的派发先结算再恢复，轮次保留原始失败。这些结果让后续请求使用配对完整的工具历史，而不自动重试结果不明的操作（[决策](../../../.agents/notes/implemented/bug-fix/2026-09-19-failed-step-tool-results.zh.md)）。
 
 </details>

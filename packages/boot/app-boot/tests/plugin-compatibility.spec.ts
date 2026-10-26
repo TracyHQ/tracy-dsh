@@ -166,12 +166,12 @@ describe('compatibility warning', () => {
       ...identity, runtimeVersion: runtime,
       peers: { '@deepseek-ai/dsh': '^0.2.0', '@deepseek-ai/dsh-session': 'broken' }, exempted,
     })).toBe(
-      'Plugin @example/plugin@2.0.0 is incompatible with dsh 0.1.7-alpha.1: '
+      'Plugin @example/plugin@2.0.0 is incompatible with Tracy 0.1.7-alpha.1: '
       + 'peerDependencies {"@deepseek-ai/dsh":"^0.2.0","@deepseek-ai/dsh-session":"broken"}. '
       + 'Running it may cause crashes or data loss. '
-      + 'Update the plugin or install a plugin version compatible with this dsh runtime. '
-      + 'To accept this risk explicitly, grant the exact-version exemption for @example/plugin@2.0.0 on dsh 0.1.7-alpha.1 '
-      + 'with `dsh plugin allow-version` or the plugin manager, then retry the installation or restart dsh. '
+      + 'Update the plugin or install a plugin version compatible with this Tracy version. '
+      + 'To accept this risk explicitly, grant the exact-version exemption for @example/plugin@2.0.0 on Tracy 0.1.7-alpha.1 '
+      + 'with `dsh plugin allow-version` or the plugin manager, then retry the installation or restart Tracy. '
       + `Exact-version exemption: ${exempted ? 'active' : 'not active'}.`,
     )
   })

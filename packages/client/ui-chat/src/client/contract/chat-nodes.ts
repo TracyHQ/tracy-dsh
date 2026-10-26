@@ -51,7 +51,19 @@ export interface ToolChatData {
 export interface ManualCompactionChatData {
   readonly command: CommandNode
   readonly compaction: CompactionSummaryNode | null
+  /**
+   * Seq of the newest event of this lifecycle once the command settled: where
+   * the row's branch action cuts (Tracy, tracy.42). Absent while it runs.
+   */
+  readonly settledSeq?: number
 }
+
+/**
+ * One ordinary slash command's lifecycle, plus where a branch of its settled
+ * row cuts (Tracy, tracy.42): the newest event of the lifecycle, absent while
+ * it runs.
+ */
+export type CommandChatData = CommandNode & { readonly settledSeq?: number }
 
 /** One durable retry chain rendered as a single row. */
 export interface RetryChatData {

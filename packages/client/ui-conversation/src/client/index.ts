@@ -54,6 +54,7 @@ export { ConversationEventRegistry } from './conversation/event-registry.ts'
 export { ConversationLocationIndex } from './conversation/location-index.ts'
 export type { ConversationLocationDataChange } from './conversation/location-index.ts'
 export { ConversationViewRegistry } from './conversation/view-registry.ts'
+export { UserTextFoldRegistry } from './conversation/user-text-fold-registry.ts'
 
 export type { ConversationKey } from './locales.ts'
 export type {

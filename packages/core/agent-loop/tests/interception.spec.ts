@@ -531,7 +531,7 @@ describe('agent/pre-step', () => {
     expect(JSON.stringify(adapter.requests[0]?.messages)).not.toContain('secret')
   })
 
-  it('a throwing pre-step listener reports the driver error and retains adjacent work', async () => {
+  it('a throwing pre-step listener reports the driver error and retains the claimed prompt and adjacent work', async () => {
     const adapter = new MockAdapter([textResponse('after')])
     const ctx = await harness(adapter)
     const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
@@ -566,8 +566,9 @@ describe('agent/pre-step', () => {
     }])
     expect(statuses).toEqual(['running', 'idle'])
     expect(adapter.requests).toHaveLength(0)
+    // Tracy: the claimed prompt never reached the log, so it returns to the head of the queue.
     expect(agent.inbox.nextTurn.map(message => message.content[0]))
-      .toEqual([{ type: 'text', text: 'second' }])
+      .toEqual([{ type: 'text', text: 'first' }, { type: 'text', text: 'second' }])
   })
 })
 

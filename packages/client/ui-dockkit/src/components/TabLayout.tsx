@@ -96,7 +96,7 @@ function TabHost({ state, callbacks, intents, tab, pane, column, floats, focusRe
           {selected && (floating
             ? <FloatHeader paneId={pane.id} tab={tab} labels={callbacks.labels} intents={intents}
               renderTabTitle={callbacks.renderTabTitle} canCloseTab={callbacks.canCloseTab} drag={floats.drag} />
-            : <TabStrip state={state} pane={pane} callbacks={callbacks} />)}
+            : <TabStrip state={state} pane={pane} callbacks={callbacks} active={visible} />)}
         </div>
         <div ref={body} className={clsx(css.tabHostBody, floating ? css.floatBody : css.paneBody)}>
           {visited && (retained || (active && selected)) ? callbacks.renderTab(tab) : null}

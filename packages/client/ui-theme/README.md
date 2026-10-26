@@ -25,11 +25,11 @@ English | [中文](README.zh.md)
 <a id="use-this-package"></a>
 ## Use this package
 
-Users switch the color scheme and content font size from two rows in Settings (General section); both choices persist across restarts on a loopback browser. Feature plugins consume the current snapshot through `ctx.theme` and read the `--dsw-*` tokens in CSS; they do not manage theme state themselves.
+Users switch the color scheme and content font size from two rows in Settings (General section); both choices persist across restarts: on a loopback browser in the Host settings document, on a remote page in that browser's localStorage. Feature plugins consume the current snapshot through `ctx.theme` and read the `--dsw-*` tokens in CSS; they do not manage theme state themselves.
 
 ### Appearance and font size
 
-The plugin registers Appearance preference cubes and a font-size stepper in the General section. The stepper accepts integer values from 10 to 22 px and defaults to 14 px. It changes conversation headings and base text by the same increment, including the user bubble and composer draft; flow-row titles, summaries, and tables follow one step under the body size, while small text and code keep fixed sizes. Each accepted change writes through the Host settings API. Rapid changes serialize in gesture order with namespace revisions, and a rejected latest write reloads the durable values. Non-loopback pages keep both choices process-local.
+The plugin registers Appearance preference cubes and a font-size stepper in the General section. The stepper accepts integer values from 10 to 22 px and defaults to 14 px. It changes conversation headings and base text by the same increment, including the user bubble and composer draft; flow-row titles, summaries, and tables follow one step under the body size, while small text and code keep fixed sizes. Each accepted change writes through the Host settings API. Rapid changes serialize in gesture order with namespace revisions, and a rejected latest write reloads the durable values. Non-loopback pages never write the Host document; they store both choices in the browser's localStorage under `dsh.ui-theme.v1`, and the bootstrap script applies the stored values before first paint.
 
 ### Registering a theme
 
@@ -87,7 +87,7 @@ The `--dsw-alias-turn-trigger-*` tokens provide separate resting and hover backg
 
 ### Preference persistence
 
-The service provides itself immediately with the schema defaults on a loopback browser, then loads the `ui-theme` namespace and writes each accepted theme or font-size change through the Host settings API. Pushed settings changes and reconnects refetch the namespace. Non-loopback pages do not create that Host-backed scope. The persistence boundary is owned by the [Host-backed preferences note](../../../.agents/notes/implemented/bug-fix/2026-08-06-host-backed-web-preferences.md).
+The service provides itself immediately with the schema defaults on a loopback browser, then loads the `ui-theme` namespace and writes each accepted theme or font-size change through the Host settings API. Pushed settings changes and reconnects refetch the namespace. Non-loopback pages do not create that Host-backed scope: the theme runtime reads and writes `dsh.ui-theme.v1` in localStorage instead, keeping only values within the schema bounds, and blocked, missing or corrupt storage reads as nothing stored. The persistence boundary is owned by the [Host-backed preferences note](../../../.agents/notes/implemented/bug-fix/2026-08-06-host-backed-web-preferences.md).
 
 </details>
 

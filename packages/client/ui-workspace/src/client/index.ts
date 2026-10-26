@@ -39,7 +39,7 @@ import {
   type ArchiveSessionInjected, type ForkSessionInjected, menuOpenStateFactory, type PinSessionInjected,
   type SessionArchiveConfirmInjected, type SessionArchiveConfirmRequest,
   type RenameSessionInjected, type RowToast, type RowToastInjected, type RowToastState, type SessionRenameDialogInjected,
-  type WorkspaceBrowserInjected, type WorkspacePickerInjected,
+  type WorkspaceBrowserInjected, type WorkspacePickerInjected, workspaceMenuOpenStateFactory,
 } from './contract/slots.ts'
 import { createWorkspaceShortcutControls, installWorkspaceShortcuts } from './shortcuts.ts'
 import { UiWorkspaceService } from './navigation.ts'
@@ -51,6 +51,7 @@ import { ForkSessionMenuItem } from './session-actions/ForkSession.tsx'
 import { PinSessionMenuItem, PinSessionRowButton } from './session-actions/PinSession.tsx'
 import { RenameSessionMenuItem, SessionRenameDialog } from './session-actions/RenameSession.tsx'
 import { RowActionToast } from './session-actions/RowActionToast.tsx'
+import { ShippedDeleteWorkspaceItem, ShippedRenameWorkspaceItem } from './rows/WorkspaceMenuItems.tsx'
 import { WorkspacePicker } from './WorkspacePicker.tsx'
 import { en, zh, type WorkspaceKey } from './locales.ts'
 
@@ -135,6 +136,11 @@ export function apply(ctx: Context): void {
     subscribe: listener => ctx.slots.subscribe(hole, listener),
   })
   const browserFlowSource = flowSource('sidebar.workspaces.directoryFlow')
+  // Tracy: true while the Workspace row menu list has any registration.
+  const workspaceMenuSource: HostObservable<boolean> = {
+    getSnapshot: () => ctx.slots.entries('sidebar.workspaces.workspace.menu.item').length > 0,
+    subscribe: listener => ctx.slots.subscribe('sidebar.workspaces.workspace.menu.item', listener),
+  }
   const hostInfo: HostObservable<RemoteHostFacts> = {
     getSnapshot: () => ctx.remote.$host,
     subscribe: listener => ctx.on('connection/reset', listener),
@@ -249,7 +255,7 @@ export function apply(ctx: Context): void {
     closeAddWorkspace: shortcutControls.closeAdd,
     setDirectoryBusy: shortcutControls.directoryBusy,
     dismissForkError: shortcutControls.dismissForkError,
-    hooks: { directoryFlow: browserFlowSource, hostInfo, workspaceShortcuts: shortcutControls.state, shortcuts: ctx.shortcuts.catalog },
+    hooks: { directoryFlow: browserFlowSource, workspaceMenu: workspaceMenuSource, hostInfo, workspaceShortcuts: shortcutControls.state, shortcuts: ctx.shortcuts.catalog },
   })
   const pickerInjected = (): WorkspacePickerInjected => ({
     createWorkspace: input => workspaces.create(input),
@@ -269,6 +275,12 @@ export function apply(ctx: Context): void {
           kind: 'list', scope: 'root', inject: { hooks: { menuOpenState: menuOpenStateFactory, shortcuts: ctx.shortcuts.catalog } },
         },
         'sidebar.workspaces.session.row.action': { kind: 'list', scope: 'root' },
+        // Tracy: the Workspace row menu (shipped rename/delete registered
+        // below) and the grouped views' section label.
+        'sidebar.workspaces.workspace.menu.item': {
+          kind: 'list', scope: 'root', inject: { hooks: { menuOpenState: workspaceMenuOpenStateFactory } },
+        },
+        'sidebar.workspaces.section.label': { kind: 'single', scope: 'root' },
         'sidebar.session.row.leading': { kind: 'list', scope: 'root' },
         'sidebar.session.row.hover': { kind: 'list', scope: 'root' },
       },
@@ -287,6 +299,12 @@ export function apply(ctx: Context): void {
     yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'rename', order: 200, locale: NS, inject: renameInjected }, RenameSessionMenuItem)
     yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'fork', order: 300, locale: NS, inject: forkInjected }, ForkSessionMenuItem)
     yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'archive', order: 400, locale: NS, inject: archiveInjected }, ArchiveSessionMenuItem)
+  })
+  // Tracy: the shipped Workspace row rows. Each renders the element the row
+  // built for its id, so a plugin shadowing the id can keep it per row.
+  ctx.slots.inject('sidebar.workspaces.workspace.menu.item', function* () {
+    yield ctx.slots.register({ name: 'sidebar.workspaces.workspace.menu.item', id: 'rename', order: 100 }, ShippedRenameWorkspaceItem)
+    yield ctx.slots.register({ name: 'sidebar.workspaces.workspace.menu.item', id: 'delete', order: 200 }, ShippedDeleteWorkspaceItem)
   })
   ctx.slots.inject('sidebar.workspaces.session.row.action', function* () {
     yield ctx.slots.register({ name: 'sidebar.workspaces.session.row.action', id: 'archive', order: 100, locale: NS, inject: archiveInjected }, ArchiveSessionRowButton)

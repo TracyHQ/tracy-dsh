@@ -28,12 +28,10 @@ export type * from './types.ts'
  * surface owns its localized labels.
  */
 export const FEEDBACK_CATEGORIES = [
-  'task-result',
-  'instruction-following',
-  'product-interaction',
-  'service-stability',
-  'resource-cost',
-  'security-privacy-permission',
+  'general',
+  'product-feature',
+  'desktop-app',
+  'web-app',
   'other',
 ] as const satisfies readonly FeedbackCategory[]
 
@@ -50,15 +48,16 @@ declare module '@deepseek-ai/cordis' {
 
 /**
  * Record feedback independently of any UI trigger. Surrounding whitespace is
- * discarded and a blank text is recorded as absent; an entry with neither
- * text nor category is still recorded.
+ * discarded and a blank text is recorded as absent; entries with neither text
+ * nor categories are still recorded.
  * @param session - session the feedback describes.
- * @param entry - human-authored remark and its category.
+ * @param entry - human-authored remark and selected categories.
  */
 export function recordFeedback(session: Session, entry: FeedbackRecord): void {
   const text = entry.text?.trim() ?? ''
   session.append('feedback/record', {
     ...(text.length === 0 ? {} : { text }),
+    ...(entry.categories === undefined || entry.categories.length === 0 ? {} : { categories: [...entry.categories] }),
     ...(entry.category === undefined ? {} : { category: entry.category }),
   })
 }
@@ -94,7 +93,7 @@ export class SessionFeedbackService extends TypertRemoteService {
 
   /**
    * Record one remark on a live Session.
-   * @param request - target Session plus the optional text and category.
+   * @param request - target Session plus the optional text and categories.
    * @returns the recorded postcondition, or `session-not-found` when no live
    * Session carries the id.
    */
@@ -119,7 +118,7 @@ export function apply(ctx: Context): void {
   ctx.commands.register({
     definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-feedback'),
     name: 'feedback',
-    description: 'Record feedback about this session',
+    description: 'Help us to improve Tracy',
     input: { hint: '<text>' },
     recordInput: false,
     handler: executeFeedbackCommand,

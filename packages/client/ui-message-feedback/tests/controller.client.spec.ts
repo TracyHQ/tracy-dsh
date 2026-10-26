@@ -81,21 +81,21 @@ describe('MessageFeedbackController', () => {
     expect(controller.getSnapshot().items.get(MSG)).toEqual(second)
   })
 
-  it('forwards the entry as note and category and omits absent members', async () => {
+  it('forwards the entry as note and categories and omits absent members', async () => {
     const controller = new MessageFeedbackController(mock.remote.messageFeedback, SESSION)
 
-    await controller.rate(MSG, 'negative', { text: 'helpful', category: 'task-result' })
+    await controller.rate(MSG, 'negative', { text: 'helpful', categories: ['general', 'desktop-app'] })
     await controller.rate(OTHER, 'negative')
 
     const puts = mock.remote.messageFeedback.put.mock.calls.map(([request]) => request)
-    expect(puts[0]).toMatchObject({ note: 'helpful', category: 'task-result' })
+    expect(puts[0]).toMatchObject({ note: 'helpful', categories: ['general', 'desktop-app'] })
     expect(puts[1]).not.toHaveProperty('note')
-    expect(puts[1]).not.toHaveProperty('category')
+    expect(puts[1]).not.toHaveProperty('categories')
   })
 
   it('retract deletes a matching rating and ignores an opposite judgment', async () => {
     mock.remote.messageFeedback.list.mockResolvedValueOnce(ok({
-      ok: true, value: { items: [item({ note: 'stored', category: 'other' })] },
+      ok: true, value: { items: [item({ note: 'stored', categories: ['other'] })] },
     }))
     const controller = new MessageFeedbackController(mock.remote.messageFeedback, SESSION)
 

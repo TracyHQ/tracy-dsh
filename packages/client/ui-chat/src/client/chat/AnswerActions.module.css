@@ -1,0 +1,48 @@
+/* Tracy (tracy.42): the action row of an answer that is not an agent turn
+   (a settled slash command, a client-local answer). Offsets match the turn
+   tail's row (TurnTailNodeView.module.css .actions); the feedback buttons
+   match ui-message-feedback's (MessageFeedbackActions.module.css .action), so
+   the row reads the same as an agent reply's. */
+
+.root {
+  display: flex;
+  flex-direction: column;
+}
+
+.actions {
+  margin-top: 4px;
+  margin-left: -6px;
+}
+
+.feedback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(28px + var(--dsh-content-font-delta, 0px));
+  height: calc(28px + var(--dsh-content-font-delta, 0px));
+  padding: 6px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.feedback svg {
+  width: calc(15px + var(--dsh-content-font-delta, 0px));
+  height: calc(15px + var(--dsh-content-font-delta, 0px));
+}
+
+.feedback:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.feedback:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.feedback[data-active] {
+  color: var(--dsw-alias-label-tertiary);
+}
