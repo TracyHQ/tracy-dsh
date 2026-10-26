@@ -379,6 +379,13 @@ function assertNoUnresolvedTools(lifecycles: ReadonlyMap<string, ToolLifecycle>,
   }
 }
 
+// Tracy: the repair text is branded (core/session repair.ts `notStarted`), and logs written
+// before the rebrand carry the upstream wording — a stored repair is exact when it is either.
+const TOOL_NOT_STARTED_REPAIR_TEXTS: ReadonlySet<string> = new Set([
+  'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.',
+  'The tool call was interrupted before Tracy recorded it as started. Retry it if it is still needed.',
+])
+
 function isExactToolNotStartedRepair(
   event: SessionFormatEvent,
   content: readonly Record<string, SessionFormatJsonValue>[],
@@ -397,8 +404,8 @@ function isExactToolNotStartedRepair(
     && block?.['isError'] === true
     && repairContent?.length === 1
     && repairContent[0]?.['type'] === 'text'
-    && repairContent[0]['text']
-      === 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.'
+    && typeof repairContent[0]['text'] === 'string'
+    && TOOL_NOT_STARTED_REPAIR_TEXTS.has(repairContent[0]['text'])
 }
 
 function applySurface(surface: readonly number[], event: SessionFormatEvent): number[] {

@@ -1,14 +1,15 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { withFileLock, writeFileAtomic } from '../src/index.ts'
 
 const state = vi.hoisted(() => ({
   afterClaim: undefined as ((claim: string) => Promise<void>) | undefined,
+  afterLockCreate: undefined as ((lockPath: string) => Promise<void>) | undefined,
   claimFailure: undefined as string | undefined,
   claimRemovalFails: false,
   lockRemovalFails: false,
@@ -54,6 +55,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         if (state.releaseLockBeforeProbe) await actual.rm(String(path))
         throw Object.assign(new Error('EPERM: injected exclusive-create failure'), { code: 'EPERM' })
       }
+      if (state.afterLockCreate !== undefined && String(path).endsWith('.lock')) {
+        // The lock exists on disk from here, before the creating call's promise settles.
+        await (actual.writeFile as (path: unknown, ...args: never[]) => Promise<void>)(path, ...rest)
+        const hook = state.afterLockCreate
+        state.afterLockCreate = undefined
+        await hook(String(path))
+        return
+      }
       return (actual.writeFile as (path: unknown, ...args: never[]) => Promise<void>)(path, ...rest)
     }) as typeof actual.writeFile,
   }
@@ -65,6 +74,7 @@ afterEach(async () => {
   vi.useRealTimers()
   vi.restoreAllMocks()
   state.afterClaim = undefined
+  state.afterLockCreate = undefined
   state.claimFailure = undefined
   state.claimRemovalFails = false
   state.lockRemovalFails = false
@@ -107,6 +117,24 @@ function probeExited(pids: readonly number[] = [EXITED_PID], responses = Infinit
 /** The lock record a holder writes. */
 function record(pid: number): string {
   return `${String(pid)}\n`
+}
+
+/**
+ * A modification time from before this process started: what a lock left by an
+ * earlier process with this process's PID carries, such as the previous run of
+ * a container's PID 1.
+ */
+function beforeThisProcessStarted(): Date {
+  return new Date(Date.now() - process.uptime() * 1000 - 60_000)
+}
+
+/** Write `pid`'s lock record for `target` as an earlier process left it, before this one started. */
+async function leaveEarlierLock(target: string, pid = process.pid): Promise<string> {
+  const lockPath = `${target}.lock`
+  await writeFile(lockPath, record(pid))
+  const earlier = beforeThisProcessStarted()
+  await utimes(lockPath, earlier, earlier)
+  return lockPath
 }
 
 /** Resolve once the lockfile exists, so contention is measured against a held lock. */
@@ -286,6 +314,149 @@ describe('withFileLock', () => {
     await writeFile(`${target}.lock`, record(child.pid as number))
 
     await expect(withFileLock(target, async () => 'acquired', { waitMs: 0 })).resolves.toBe('acquired')
+  })
+
+  describe('a lock under this process\'s own PID', () => {
+    // A container's PID 1 that ends mid-write leaves `1\n`, and its next run is PID 1 again
+    // (TCH stand, 10/10/2026: dsh restart-looped on `.credentials.yaml.lock`).
+    it('takes over a lock its own PID left before this process started', async () => {
+      const dir = await scratch()
+      const target = join(dir, 'document')
+      const lockPath = await leaveEarlierLock(target)
+      const startedAt = Date.now() - process.uptime() * 1000
+
+      const seen = await withFileLock(target, async () => ({
+        record: await readFile(lockPath, 'utf8'),
+        modifiedAt: (await stat(lockPath)).mtimeMs,
+      }), { waitMs: 0 })
+      expect(seen.record).toBe(record(process.pid))
+      expect(seen.modifiedAt).toBeGreaterThanOrEqual(startedAt)
+      expect(await readdir(dir)).toEqual([])
+    })
+
+    it('admits one contender at a time when several take over a lock its own PID left earlier', async () => {
+      const dir = await scratch()
+      const target = join(dir, 'document')
+      await leaveEarlierLock(target)
+      let active = 0
+      let overlapped = false
+
+      await Promise.all(Array.from({ length: 8 }, () => withFileLock(target, async () => {
+        active += 1
+        overlapped ||= active > 1
+        await new Promise(resolve => setTimeout(resolve, 5))
+        active -= 1
+      }, { waitMs: 2_000 })))
+      expect(overlapped).toBe(false)
+      expect(await readdir(dir)).toEqual([])
+    })
+
+    it('keeps a lock this process holds even when its file looks older than the process', async () => {
+      const dir = await scratch()
+      const target = join(dir, 'document')
+      const lockPath = `${target}.lock`
+      let release = (): void => {}
+      const holder = withFileLock(target, () => new Promise<void>((resolve) => { release = resolve }))
+      await waitForLock(lockPath)
+      const earlier = beforeThisProcessStarted()
+      await utimes(lockPath, earlier, earlier)
+      const operation = vi.fn(async () => {})
+
+      await expect(withFileLock(target, operation, { waitMs: 50 })).rejects.toThrow(/timed out waiting for the writer lock/)
+      expect(operation).not.toHaveBeenCalled()
+      expect(await readFile(lockPath, 'utf8')).toBe(record(process.pid))
+      release()
+      await holder
+      expect(await readdir(dir)).toEqual([])
+    })
+
+    it('keeps a lock this process holds under another spelling of its path', async () => {
+      const dir = await scratch()
+      const target = join(dir, 'document')
+      let release = (): void => {}
+      // The holder names the file relative to the working directory, the contender by its absolute path.
+      const holder = withFileLock(relative(process.cwd(), target), () => new Promise<void>((resolve) => { release = resolve }))
+      await waitForLock(`${target}.lock`)
+      const earlier = beforeThisProcessStarted()
+      await utimes(`${target}.lock`, earlier, earlier)
+
+      await expect(withFileLock(target, async () => {}, { waitMs: 50 })).rejects.toThrow(/timed out waiting for the writer lock/)
+      release()
+      await holder
+    })
+
+    it('keeps a lock another call of this process is still creating', async () => {
+      const dir = await scratch()
+      const target = join(dir, 'document')
+      const contender = vi.fn(async () => {})
+      // Between the exclusive create and its caller resuming, the lock exists but its holder has not run yet.
+      state.afterLockCreate = async (lockPath) => {
+        const earlier = beforeThisProcessStarted()
+        await utimes(lockPath, earlier, earlier)
+        await expect(withFileLock(target, contender, { waitMs: 50 })).rejects.toThrow(/timed out waiting for the writer lock/)
+      }
+
+      await expect(withFileLock(target, async () => 'created')).resolves.toBe('created')
+      expect(contender).not.toHaveBeenCalled()
+      expect(await readdir(dir)).toEqual([])
+    })
+
+    it('still times out a nested acquisition of the lock its caller holds', async () => {
+      const dir = await scratch()
+      const target = join(dir, 'document')
+      const inner = vi.fn(async () => 'inner')
+
+      await expect(withFileLock(target, async () => {
+        const earlier = beforeThisProcessStarted()
+        await utimes(`${target}.lock`, earlier, earlier)
+        return await withFileLock(target, inner, { waitMs: 50 })
+      })).rejects.toThrow(/timed out waiting for the writer lock/)
+      expect(inner).not.toHaveBeenCalled()
+      expect(await readdir(dir)).toEqual([])
+    })
+
+    it('waits for a lock another copy of this package took since this process started', async () => {
+      // Another copy (or thread) keeps its own count of acquisitions; the file's time is what tells it apart.
+      vi.resetModules()
+      const copy = await import('../src/index.ts')
+      const dir = await scratch()
+      const target = join(dir, 'document')
+      let release = (): void => {}
+      const holder = copy.withFileLock(target, () => new Promise<void>((resolve) => { release = resolve }))
+      await waitForLock(`${target}.lock`)
+      const operation = vi.fn(async () => {})
+
+      await expect(withFileLock(target, operation, { waitMs: 50 })).rejects.toThrow(/timed out waiting for the writer lock/)
+      expect(operation).not.toHaveBeenCalled()
+      release()
+      await holder
+      expect(await readdir(dir)).toEqual([])
+    })
+
+    it('waits for its own PID\'s earlier lock when the runtime cannot tell when it started', async () => {
+      const dir = await scratch()
+      const target = join(dir, 'document')
+      const lockPath = await leaveEarlierLock(target)
+      vi.spyOn(process, 'uptime').mockReturnValue(Number.NaN)
+
+      await expect(withFileLock(target, async () => {}, { waitMs: 50 })).rejects.toThrow(/timed out waiting for the writer lock/)
+      expect(await readFile(lockPath, 'utf8')).toBe(record(process.pid))
+    })
+
+    it('keeps a lock rewritten under its own PID while this contender claimed the earlier one', async () => {
+      const dir = await scratch()
+      const target = join(dir, 'document')
+      const lockPath = await leaveEarlierLock(target)
+      state.afterClaim = async () => {
+        state.afterClaim = undefined
+        await rm(lockPath)
+        await writeFile(lockPath, record(process.pid))
+      }
+
+      await expect(withFileLock(target, async () => {}, { waitMs: 50 })).rejects.toThrow(/timed out waiting for the writer lock/)
+      expect(await readFile(lockPath, 'utf8')).toBe(record(process.pid))
+      expect(await readdir(dir)).toEqual(['document.lock'])
+    })
   })
 
   it('admits one contender at a time when several take over the same exited holder', async () => {

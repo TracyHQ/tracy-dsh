@@ -33,13 +33,15 @@ import type { ResolvedRetryPolicy } from './retry-policy.ts'
 import type { ProviderRequestId } from './brand.ts'
 import { callConfigEquals } from './call-config.ts'
 import type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
-import { HarnessError, INVALID_CREDENTIAL_CODE } from './error.ts'
+import { ATTACHMENT_MISSING_CODE, HarnessError, INVALID_CREDENTIAL_CODE } from './error.ts'
+import { readRetainedImages } from './request-images.ts'
+import type { RequestImages } from './request-images.ts'
 import { normalizeLlmFailure } from './adapter-failure.ts'
 import { normalizeApiKey } from './api-key.ts'
 import {
   contentHasFile, contentHasImage, fileHandleText, projectFilesToText, projectImagesForTextModel, projectToolUpdates,
 } from './content.ts'
-import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { FileAttachmentRef, ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 
 export * from './attribution.ts'
 export * from './brand.ts'
@@ -51,6 +53,7 @@ export * from './assistant-stream.ts'
 export * from './message.ts'
 export * from './retry-policy.ts'
 export { BlockAssembler } from './assembler.ts'
+export type { RequestImages } from './request-images.ts'
 export { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
 
@@ -127,6 +130,35 @@ export class LlmError extends HarnessError {
       ...options?.requestId === undefined ? {} : { requestId: options.requestId },
       ...options?.offloadImages === undefined ? {} : { offloadImages: options.offloadImages },
     })
+  }
+}
+
+/**
+ * Read the request version of every retained (not offloaded) image once.
+ *
+ * An image whose stored copy is gone (`ATTACHMENT_NOT_FOUND`,
+ * `ATTACHMENT_CORRUPT`) and that appears only before the latest user message
+ * becomes the {@link unavailableImageText} note, so one lost file in history
+ * cannot fail every later turn. Any other attachment read failure, and a lost
+ * image in the latest user message or after it, fails as `LlmError`
+ * {@link ATTACHMENT_MISSING_CODE}: never a transport failure, and not in the
+ * default retryable set.
+ * @param messages - request history; never mutated.
+ * @param read - read one reference's request version.
+ * @returns history with lost earlier images replaced, and the versions of the others.
+ * @throws {LlmError} `ATTACHMENT_MISSING`; other failures (cancellation) propagate unchanged.
+ */
+export async function readRequestImages(
+  messages: readonly RequestMessage[],
+  read: (ref: ImageAttachmentRef) => Promise<RequestImageAttachment>,
+): Promise<RequestImages> {
+  try {
+    return await readRetainedImages(messages, read)
+  } catch (error) {
+    if (error instanceof HarnessError && error.code === ATTACHMENT_MISSING_CODE) {
+      throw new LlmError(error.message, ATTACHMENT_MISSING_CODE, { cause: error.cause })
+    }
+    throw error
   }
 }
 

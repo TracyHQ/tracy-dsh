@@ -316,6 +316,16 @@ describe('built-in conversation node Definitions', () => {
     expect(chatViewDefinition.isActive?.(current)).toBe(false)
   })
 
+  it('marks where a settled command row branches: the newest event of its lifecycle (Tracy tracy.42)', () => {
+    const value = assembler([
+      at(1, 'command/run', { commandId: 'plan-1', name: 'plan', source: { kind: 'user' } }),
+    ])
+    expect(node(snapshot(value), 'command')?.data).not.toHaveProperty('settledSeq')
+    value.append(at(4, 'command/done', { commandId: 'plan-1', kind: 'success', text: 'Plan mode' }))
+    value.flush()
+    expect(node(snapshot(value), 'command')?.data).toMatchObject({ seq: 1, settledSeq: 4 })
+  })
+
   it('keeps the Turn rail projection current when a chunk updates one node in place', () => {
     const value = assembler([
       at(1, 'turn/start', { turn: 1 }),
@@ -2480,6 +2490,8 @@ describe('built-in conversation node Definitions', () => {
     ])
 
     const manual = node(snapshot(compactions), 'manual-compaction')
+    // Tracy (tracy.42): the settled /compact row branches after its whole lifecycle.
+    expect((manual?.data as ManualCompactionChatData).settledSeq).toBe(15)
     expect((manual?.data as ManualCompactionChatData).compaction).toMatchObject({
       summary: 'manual summary',
       summaryEventSeq: 12,

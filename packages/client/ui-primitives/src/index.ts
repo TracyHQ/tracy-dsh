@@ -58,6 +58,8 @@ export type {
   CodeFileType, FileType, FileTypeIconProps, FileTypeKind, FileTypeProjectContext,
 } from './FileTypeIcon.tsx'
 export { projectUserText, type UserTextReferences } from './user-text.tsx'
+export { userTextFoldRanges, UserTextFoldsProvider, useUserTextFolds } from './user-text-folds.ts'
+export type { UserTextFold, UserTextFoldChip, UserTextFoldRange } from './user-text-folds.ts'
 export { Tooltip } from './Tooltip.tsx'
 export type { TooltipSide } from './Tooltip.tsx'
 export { pointerModality } from './input-modality.ts'

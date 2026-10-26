@@ -170,6 +170,27 @@ interface ResolvedJsonlGeneration {
   readonly currentPath: string
 }
 
+/** One selected generation as one root scan observed it. */
+interface ScannedGeneration {
+  readonly selected: ResolvedJsonlGeneration
+  /** The selected file at the scan's `stat`, or undefined when the file disappeared after enumeration. */
+  readonly present: ScannedGenerationFile | undefined
+}
+
+/** Physical state and translated header of one selected generation file. */
+interface ScannedGenerationFile {
+  readonly revision: PersistenceRevision
+  readonly sizeBytes: number
+  /** The translated header, or undefined when it is absent, malformed, unsupported, or corrupt. */
+  readonly header: SessionHeader | undefined
+}
+
+/** A translated header paired with the physical revision of the file it was read from. */
+interface RevisionedHeader {
+  readonly revision: PersistenceRevision
+  readonly header: SessionHeader
+}
+
 /** One backend-owned historical preparation shared by its current callers. */
 interface MigrationPreparation {
   readonly sourcePath: string
@@ -189,6 +210,17 @@ function fileRevision(identity: JsonlPhysicalIdentity): PersistenceRevision {
     identity.mtimeNs,
     identity.ctimeNs,
   ].join(':'))
+}
+
+/**
+ * Fingerprint the historical corpus as SHA-256 over its selected paths in sorted order.
+ * @param revisions - each selected path's physical revision, or `'missing'` for a file that disappeared.
+ * @returns the hex digest that historical revisions append.
+ */
+function historicalCorpusFingerprint(revisions: ReadonlyMap<string, string>): string {
+  const hash = createHash('sha256')
+  for (const path of [...revisions.keys()].sort()) hash.update(JSON.stringify([path, revisions.get(path)]))
+  return hash.digest('hex')
 }
 
 /** Whether a filesystem error means absence; every non-ENOENT failure must surface. */
@@ -266,6 +298,13 @@ class JsonlSessionPersistence extends SessionPersistence {
   private readonly coldLogMemo = new Map<SessionId, StoredLog>()
   /** One joinable decode/migration operation per selected historical Session file revision. */
   private readonly migrationPreparations = new Map<SessionId, MigrationPreparation>()
+  /**
+   * Headers translated by the latest completed root scan, keyed by selected generation path and
+   * guarded by that file's physical revision. A published header frame never changes, so a scan that
+   * observes the same revision reuses the header without opening the log. Each completed scan replaces
+   * the map with the readable files it observed, so it holds at most one entry per selected generation.
+   */
+  private scannedHeaders = new Map<string, RevisionedHeader>()
 
   constructor(ctx: Context, public config: Config) {
     super(ctx)
@@ -480,26 +519,25 @@ class JsonlSessionPersistence extends SessionPersistence {
     // append lands mid-scan is then still in this snapshot (its artifact may
     // predate the scan), so create-to-list visibility never has a hole.
     const pending = [...this.tracker.pendingEntries()]
-    const artifacts = await this.listArtifacts(signal)
-    const corpusRevision = artifacts.some(artifact => artifact.sourceVersion < SESSION_FORMAT_VERSION)
-      ? await this.historicalCorpusRevision(signal) : undefined
-    for (const artifact of artifacts) {
-      signal?.throwIfAborted()
-      try {
-        const identity = await stat(artifact.path, { bigint: true })
-        signal?.throwIfAborted()
-        listed.add(artifact.header.id)
-        snapshots.push({
-          header: artifact.header,
-          revision: artifact.sourceVersion < SESSION_FORMAT_VERSION
-            ? SessionPersistenceRevision(`${fileRevision(identity)}:${corpusRevision}`)
-            : fileRevision(identity),
-          sizeBytes: Number(identity.size),
-        })
-      } catch (error: unknown) {
-        signal?.throwIfAborted()
-        if (!isENOENT(error)) throw error
-      }
+    const scanned = await this.scanGenerations(signal)
+    // The historical fingerprint covers every selected file, including unreadable headers and
+    // files that disappeared after enumeration.
+    const corpusRevision = scanned.some(({ selected, present }) =>
+      present?.header !== undefined && selected.sourceVersion < SESSION_FORMAT_VERSION)
+      ? historicalCorpusFingerprint(new Map(scanned.map(({ selected, present }) =>
+        [selected.sourcePath, present?.revision ?? 'missing'])))
+      : undefined
+    for (const { selected, present } of scanned) {
+      if (present?.header === undefined) continue
+      listed.add(present.header.id)
+      snapshots.push({
+        // A copy, so a caller cannot alter the header the next scan reuses.
+        header: { ...present.header },
+        revision: selected.sourceVersion < SESSION_FORMAT_VERSION
+          ? SessionPersistenceRevision(`${present.revision}:${corpusRevision}`)
+          : present.revision,
+        sizeBytes: present.sizeBytes,
+      })
     }
     for (const [id, entry] of pending) {
       if (!listed.has(id)) snapshots.push({ header: entry.header, revision: entry.revision })
@@ -1036,51 +1074,78 @@ class JsonlSessionPersistence extends SessionPersistence {
 
   /** Historical logical events depend on the corpus, including members with unreadable headers. */
   private async historicalCorpusRevision(signal?: AbortSignal): Promise<string> {
-    const paths = (await this.listGenerations(signal)).map(source => source.sourcePath).sort()
-    const hash = createHash('sha256')
-    for (const path of paths) {
+    const revisions = new Map<string, string>()
+    for (const source of await this.listGenerations(signal)) {
       signal?.throwIfAborted()
       let revision: string
       try {
-        revision = fileRevision(await stat(path, { bigint: true }))
+        revision = fileRevision(await stat(source.sourcePath, { bigint: true }))
       } catch (error: unknown) {
         if (!isENOENT(error)) throw error
         revision = 'missing'
       }
-      hash.update(JSON.stringify([path, revision]))
+      revisions.set(source.sourcePath, revision)
     }
     signal?.throwIfAborted()
-    return hash.digest('hex')
+    return historicalCorpusFingerprint(revisions)
   }
 
-  private async listArtifacts(
-    signal?: AbortSignal,
-  ): Promise<Array<{ header: SessionHeader; path: string; sourceVersion: number }>> {
+  /**
+   * Enumerate the selected generations once, `stat` each file once, and translate each readable
+   * header. A header translated by the previous completed scan is reused while its file's physical
+   * revision is unchanged; any other file's header frame is read and validated. Unsupported and
+   * corrupt headers are omitted; other I/O failures and cancellation propagate.
+   */
+  private async scanGenerations(signal?: AbortSignal): Promise<ScannedGeneration[]> {
     signal?.throwIfAborted()
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
-    const artifacts: Array<{ header: SessionHeader; path: string; sourceVersion: number }> = []
+    const previous = this.scannedHeaders
+    const retained = new Map<string, RevisionedHeader>()
+    const scanned: ScannedGeneration[] = []
     const ids = new Set<SessionId>()
     for (const selected of await this.listGenerations(signal)) {
       signal?.throwIfAborted()
-      let header: SessionHeader | undefined
+      let identity: JsonlPhysicalIdentity
       try {
-        header = await this.readGenerationHeader(selected, undefined, signal)
+        identity = await stat(selected.sourcePath, { bigint: true })
       } catch (error: unknown) {
-        if (error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) continue
-        throw error
-      }
-      if (header === undefined) {
+        signal?.throwIfAborted()
+        if (!isENOENT(error)) throw error
+        scanned.push({ selected, present: undefined })
         continue
       }
-      if (ids.has(header.id)) {
-        throw new Error(`duplicate JSONL session id "${header.id}" appears in multiple project directories`)
+      signal?.throwIfAborted()
+      const revision = fileRevision(identity)
+      const memoized = previous.get(selected.sourcePath)
+      let header = memoized?.revision === revision ? memoized.header : undefined
+      if (header === undefined) {
+        try {
+          header = await this.readGenerationHeader(selected, undefined, signal)
+        } catch (error: unknown) {
+          if (!(error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError)) {
+            throw error
+          }
+        }
       }
-      ids.add(header.id)
-      artifacts.push({ header, path: selected.sourcePath, sourceVersion: selected.sourceVersion })
+      if (header !== undefined) {
+        if (ids.has(header.id)) {
+          throw new Error(`duplicate JSONL session id "${header.id}" appears in multiple project directories`)
+        }
+        ids.add(header.id)
+        retained.set(selected.sourcePath, { revision, header })
+      }
+      scanned.push({ selected, present: { revision, sizeBytes: Number(identity.size), header } })
     }
     signal?.throwIfAborted()
-    return artifacts
+    this.scannedHeaders = retained
+    return scanned
+  }
+
+  /** The readable selected generations of one root scan, with their translated headers. */
+  private async listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>> {
+    return (await this.scanGenerations(signal)).flatMap(({ selected, present }) =>
+      present?.header === undefined ? [] : [{ header: present.header, path: selected.sourcePath }])
   }
 
   /** Read and translate one selected generation header without inspecting its body. */

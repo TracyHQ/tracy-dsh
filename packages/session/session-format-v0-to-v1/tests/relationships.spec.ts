@@ -274,6 +274,21 @@ describe('released v1 whole-artifact relationships', () => {
       },
     }
     expect(decode([...turnAndStep, advertised, synthetic]).events).toHaveLength(4)
+    // Tracy: the branded repair text (core/session repair.ts) is as exact as the upstream one.
+    const branded = {
+      ...synthetic,
+      data: {
+        ...synthetic.data,
+        message: {
+          ...synthetic.data.message,
+          content: [{
+            type: 'tool-result', toolCallId: 'a', isError: true,
+            content: [{ type: 'text', text: 'The tool call was interrupted before Tracy recorded it as started. Retry it if it is still needed.' }],
+          }],
+        },
+      },
+    }
+    expect(decode([...turnAndStep, advertised, branded]).events).toHaveLength(4)
     expect(() => decode([...turnAndStep, advertised, {
       ...synthetic,
       data: { ...synthetic.data, error: { name: 'Other', code: 'TOOL_NOT_STARTED' } },

@@ -657,6 +657,16 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.getByRole('tablist').hasAttribute('data-conversation-tabs')).toBe(true)
   })
 
+  it('names each view tab by its view id, so a host can address one tab (Tracy)', () => {
+    const viewTabs: ViewTab[] = [
+      { id: 'chat', label: 'Chat' },
+      { id: 'trajectory', label: 'Trajectory' },
+    ]
+    const b = mount(sessionSnapshotOf(), undefined, undefined, { viewTabs })
+    expect(b.view.getByRole('tab', { name: 'Chat' }).getAttribute('data-view')).toBe('chat')
+    expect(b.view.getByRole('tab', { name: 'Trajectory' }).getAttribute('data-view')).toBe('trajectory')
+  })
+
   it('rolls the pending workspace label back when switching fails', async () => {
     const selectWorkspace = vi.fn(async () => { throw new Error('connect failed') })
     const b = mount(

@@ -86,7 +86,7 @@
     },
     "runtimeVersion": {
       "type": "string",
-      "description": "For set_version_exemption: exact DSH version from list_version_exemptions. Target must be the manifest package-name@version, not an alias or version range."
+      "description": "For set_version_exemption: exact Tracy runtime version from list_version_exemptions. Target must be the manifest package-name@version, not an alias or version range."
     },
     "acceptRisk": {
       "type": "boolean",
@@ -502,6 +502,10 @@
           "multi_select": {
             "type": "boolean",
             "description": "Whether the user may select more than one option. Defaults to false."
+          },
+          "recommended": {
+            "type": "string",
+            "description": "Label of the option you would pick yourself; it is shown as the default."
           }
         },
         "required": [

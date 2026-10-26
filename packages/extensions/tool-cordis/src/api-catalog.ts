@@ -745,9 +745,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the operator Peer, or the rejection status.',
       },
       {
-        signature: 'authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean',
+        signature: 'authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, mount?: string): boolean',
         description: 'Authenticate one frontend index request, owning a token redirect or 401.',
-        parameters: [{ name: 'request', description: 'root or configured-index HTTP request.' }, { name: 'response', description: 'response owned when the result is false.' }],
+        parameters: [{ name: 'request', description: 'root or configured-index HTTP request, its URL already stripped of any mount prefix.' }, { name: 'response', description: 'response owned when the result is false.' }, { name: 'mount', description: 'the mount prefix the page is served under (\'\' at the root): the session cookie is scoped to it and the clean redirect after a token exchange returns to it.' }],
         returns: 'true only when the frontend may serve index.html.',
       },
       {
@@ -1998,6 +1998,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Admit one prompt after explicitly resuming its Session.',
         parameters: [{ name: 'request', description: 'Session identity, prompt content, source metadata, and delivery mode.' }, { name: 'signal', description: 'caller cancellation before prompt admission begins.' }],
         returns: 'acknowledgement that the Agent accepted the prompt.',
+      },
+      {
+        signature: 'releaseHeldPrompts(sessionId: SessionId): Promise<number>',
+        description: 'Wake one idle Agent whose follow-ups `api-session/prompt-hold` held in its queue.',
+        parameters: [{ name: 'sessionId', description: 'Session whose held follow-ups are released; a cold Session is resumed.' }],
+        returns: 'the number of follow-ups released; 0 while still held, while running, or when none is pending.',
       },
       {
         signature: '@Remote(\'attachment\') attachment(request: SessionAttachmentRequest): Promise<SessionAttachmentValue>',
@@ -3493,6 +3499,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'The browser HTTP carrier service. Activation listens immediately. Route registration order does not affect requests because configured named routes must be distinct, and the fallback handler answers anything not yet claimed during startup with 404 until its owner registers. A listen failure rejects initialization, and the boot process reports the failed fiber.',
     methods: [
       {
+        signature: 'mountOf(req: IncomingMessage): string',
+        description: 'The path prefix a trusted proxy mounted this request under — \'\' at the root, else an absolute path with no trailing slash (`/site.example`). It was already removed from `req.url`; handlers that emit absolute URLs put it back in front of theirs, so a page served at `/site.example/` links to `/site.example/api` and not to the root of a host that has no `/api`.',
+        parameters: [{ name: 'req', description: 'a request (or upgrade request) this server is handling.' }],
+        returns: 'the mount prefix, or \'\' when none applied.',
+      },
+      {
         signature: 'register(route: WebRoute): () => void',
         description: 'Register a named route. Duplicate (kind, path) throws — route patterns are a composition-level contract, so a collision is a misconfiguration.',
         parameters: [{ name: 'route', description: 'kind, path, and the owning handler.' }],
@@ -3892,6 +3904,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     summary: 'One Agent failed outside a durable turn position.',
     description: 'One Agent failed outside a durable turn position.',
     parameters: [{ name: 'sessionId', description: 'Agent and Session identity.' }, { name: 'message', description: 'user-safe failure chain.' }],
+  },
+  {
+    name: 'api-session/prompt-hold',
+    mode: 'bail',
+    signature: '\'api-session/prompt-hold\'(sessionId: SessionId): boolean | undefined',
+    summary: 'Decide whether one user follow-up waits in the durable next-turn queue instead of waking its Agent.',
+    description: 'Decide whether one user follow-up waits in the durable next-turn queue instead of waking its Agent. Returning `true` holds it: the follow-up stays editable and removable in the queue until `sessionController.releaseHeldPrompts` wakes the Agent. Steering is never held, and a running Agent still claims held follow-ups when its current turn ends.',
+    parameters: [{ name: 'sessionId', description: 'Session receiving the follow-up.' }],
   },
   {
     name: 'api-session/removed',
@@ -4550,8 +4570,12 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ArchiveSessionOptions {\n    readonly stopActivity?: boolean;\n}',
   },
   {
+    name: 'AskUserQuestionAction',
+    declaration: 'export type AskUserQuestionAction = \'submit\' | \'decide\' | \'follow_up\';',
+  },
+  {
     name: 'AskUserQuestionAnswer',
-    declaration: 'export interface AskUserQuestionAnswer {\n    answers: AskUserQuestionAnswerItem[];\n}',
+    declaration: 'export interface AskUserQuestionAnswer {\n    answers: AskUserQuestionAnswerItem[];\n    action?: AskUserQuestionAction;\n    note?: string;\n}',
   },
   {
     name: 'AskUserQuestionAnswerItem',
@@ -4563,7 +4587,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AskUserQuestionItem',
-    declaration: 'export interface AskUserQuestionItem {\n    id: string;\n    question: string;\n    detail?: string;\n    header?: string;\n    options?: AskUserQuestionOption[];\n    multiSelect?: boolean;\n    intent?: AskUserQuestionIntent;\n}',
+    declaration: 'export interface AskUserQuestionItem {\n    id: string;\n    question: string;\n    detail?: string;\n    header?: string;\n    options?: AskUserQuestionOption[];\n    multiSelect?: boolean;\n    recommended?: string;\n    intent?: AskUserQuestionIntent;\n}',
   },
   {
     name: 'AskUserQuestionOption',
@@ -6078,6 +6102,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface PromptFileBinding extends Disposable {\n    commit(): void;\n}',
   },
   {
+    name: 'PromptPrompter',
+    declaration: 'export interface PromptPrompter {\n    readonly user: string;\n    readonly email?: string | null;\n}',
+  },
+  {
     name: 'PromptSection',
     declaration: 'export interface PromptSection {\n    readonly name: string;\n    readonly order: number;\n    readonly text: string | ((context: AssembleContext) => string);\n    readonly interpolate?: boolean;\n    readonly complete?: boolean;\n}',
   },
@@ -6771,7 +6799,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionPromptRequest',
-    declaration: 'export interface SessionPromptRequest {\n    readonly requestId: SessionRequestId;\n    readonly sessionId: SessionId;\n    readonly mode: \'queue\' | \'steer\';\n    readonly content: readonly PromptContentPart[];\n    readonly clientTimeZone?: string;\n}',
+    declaration: 'export interface SessionPromptRequest {\n    readonly requestId: SessionRequestId;\n    readonly sessionId: SessionId;\n    readonly mode: \'queue\' | \'steer\';\n    readonly content: readonly PromptContentPart[];\n    readonly clientTimeZone?: string;\n    readonly prompter?: PromptPrompter;\n}',
   },
   {
     name: 'SessionPromptValue',

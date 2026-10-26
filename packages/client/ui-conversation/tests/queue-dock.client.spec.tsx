@@ -21,6 +21,7 @@ import {
 } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
+import type { UserTextFold } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InputState } from '../src/client/contract/input.ts'
 import { zh } from '../src/client/locales.ts'
 import { QueueDock, queueDockEntry, type QueueDockInjected, type QueueDockProps } from '../src/client/queue/QueueDock.tsx'
@@ -97,8 +98,13 @@ const INPUT_STATE: InputState = { draft: '', attachmentIds: [], draftRev: 0, pha
 const t: QueueDockProps['t'] = makeTranslate(zh, commonZh)
 const usePanelInfo: GlobalStandardProps['usePanelInfo'] = selector => selector({ activePanelId: null })
 
-function kitFor(snapshot: SessionSnapshot, injected: Partial<QueueDockInjected> = {}) {
+function kitFor(
+  snapshot: SessionSnapshot,
+  injected: Partial<Omit<QueueDockInjected, 'hooks'>> = {},
+  folds: readonly UserTextFold[] = [],
+) {
   return {
+    useTextFolds: bindSnapshotSelector(createSnapshotStore<readonly UserTextFold[]>(folds)),
     sessionId: SID,
     t,
     usePanelInfo,
@@ -754,6 +760,31 @@ describe('QueueDock', () => {
     expect(container.innerHTML).toBe('')
   })
 
+  it('draws a folded block as the same chip in a queued row and in its sending echo', () => {
+    const fold: UserTextFold = {
+      fence: 'note-block',
+      fold: (block, after) => ({
+        label: /name="([^"]*)"/u.exec(block)?.[1] ?? '',
+        trailing: after.startsWith('\nNOTE ') ? after.length : 0,
+      }),
+    }
+    const text = `Make it bigger\n\n\`\`\`note-block\n<el name="Services">\n\`\`\`\nNOTE ${'x'.repeat(300)}`
+    const snap: TestSnapshot = {
+      ...snapshotWith([row('durable', text)]),
+      pendingSubmissions: [{ requestId: 'echo' as never, placement: 'queued', time: 1, text, attachments: [] }],
+    }
+    const source = liveSession(snap)
+    const view = render(
+      <QueueDock {...kitFor(snap, {}, [fold])} useSession={source.useSession} useProjection={source.useProjection} />,
+    )
+    fireEvent.click(view.getByRole('button', { name: /2 条排队消息/ }))
+    const chips = view.container.querySelectorAll('[data-ref-chip="fold"]')
+    expect([...chips].map(chip => chip.textContent)).toEqual(['Services', 'Services'])
+    // The long hint line past the 200-character preview cut is hidden, not shortened into view.
+    expect(view.container.textContent).not.toContain('NOTE')
+    expect(view.container.textContent).not.toContain('```')
+  })
+
   it('registers as the terminal composer-context entry', () => {
     expect(queueDockEntry.name).toBe('conversation-queue-dock')
     expect(queueDockEntry.inject).toEqual(['slots', 'conversation', 'sessions', 'uiConversation'])
@@ -765,5 +796,15 @@ describe('QueueDock', () => {
       expect.objectContaining({ name: 'conversation.input.dock', id: 'queue', order: 20 }),
       QueueDock,
     )
+    // The session-scoped face hands every row the root fold registry's live list.
+    const source = { getSnapshot: () => [], subscribe: () => () => undefined }
+    const scope = { get: () => ({ updateQueue: vi.fn(), input: { for: () => ({ notify: vi.fn() }) } }) }
+    const registerEntry = vi.fn((_spec: { inject: (id: SessionId) => QueueDockInjected }, _component: unknown) => () => undefined)
+    queueDockEntry.apply({
+      slots: { inject, register: registerEntry },
+      sessions: { scope: () => scope },
+      uiConversation: { userTextFolds: { source }, imageUrl: vi.fn() },
+    } as never)
+    expect(registerEntry.mock.calls[0]![0].inject(SID).hooks.textFolds).toBe(source)
   })
 })

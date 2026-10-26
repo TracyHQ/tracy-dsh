@@ -41,19 +41,17 @@ kind: "package-reference"
 <a id="the-web-feedback-dialog"></a>
 ### Web 反馈弹窗
 
-在 Web 客户端中，不带文本的 `/feedback`（从输入框菜单选中，或直接输入后发送）会打开反馈弹窗，而不是返回用法错误。弹窗提供下表的七个分类和一个自由文本框；每一项都可不填，空提交也会被接受，对话日志和其他反馈事件一样随记录的事件一起投递。弹窗通过 `sessionFeedback.record` 记录，追加的是同一个 `feedback/record` 事件，但没有命令簿记，也没有确认行；弹窗改用 toast 提示。
+在 Web 客户端中，不带文本的 `/feedback`（从输入框菜单选中，或直接输入后发送）会打开反馈弹窗，而不是返回用法错误。弹窗提供下表的五个可多选分类和一个自由文本框；每一项都可不填，空提交也会被接受，对话日志和其他反馈事件一样随记录的事件一起投递。弹窗通过 `sessionFeedback.record` 记录，追加的是同一个 `feedback/record` 事件，但没有命令簿记，也没有确认行；弹窗改用 toast 提示。
 
 | 分类 id | 含义 |
 |---|---|
-| `task-result` | 任务结果 |
-| `instruction-following` | 指令理解与遵循 |
-| `product-interaction` | 产品功能与交互 |
-| `service-stability` | 稳定性和速度 |
-| `resource-cost` | 资源使用与费用 |
-| `security-privacy-permission` | 安全隐私与权限 |
+| `general` | 常规 |
+| `product-feature` | 产品功能 |
+| `desktop-app` | 桌面应用 |
+| `web-app` | Web 应用 |
 | `other` | 其他 |
 
-这些 id 是日志中的持久词汇，与逐消息反馈共用；各界面自行拥有本地化标签。
+新 id 是日志中的持久词汇，与逐消息反馈共用；旧的单选 id 仍可从现有会话日志读取。各界面自行拥有本地化标签。
 
 ### 从自己的 UI 记录反馈
 

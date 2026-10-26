@@ -284,6 +284,76 @@ describe('scenario D: execute-kind /compact', () => {
   })
 })
 
+/**
+ * What a browser does with a focused contenteditable that turns read-only: it drops the focus to the
+ * document. jsdom does not, so the bench does it, the one browser behavior these cases rely on.
+ */
+function dropFocusWhenReadOnly(box: HTMLElement): void {
+  const watch = new MutationObserver(() => {
+    if (box.getAttribute('contenteditable') === 'false' && document.activeElement === box) box.blur()
+  })
+  watch.observe(box, { attributes: true, attributeFilter: ['contenteditable'] })
+  onTestFinished(() => { watch.disconnect() })
+}
+
+describe('scenario: an argued line a command handles returns the keyboard to the composer', () => {
+  /** A source that handles every argued line itself, after one macrotask like a real catalog lookup. */
+  const handlesArguedLines = (handled: string[]) => (inputTriggers: InputTriggerService): void => {
+    inputTriggers.registerSource({
+      trigger: '/' as const,
+      name: 'command',
+      candidates: () => Promise.resolve([]),
+      onPick: () => undefined,
+      matchSpace: () => undefined,
+      matchEnter: (_session: ClientSessionContext, line: string): Promise<PickOutcome> =>
+        new Promise((done) => { setTimeout(() => { handled.push(line.trim()); done('handled') }, 0) }),
+    })
+  }
+
+  it('focus is back in the composer when the line is handled, with no click', async () => {
+    const handled: string[] = []
+    const b = await scopedBench(handlesArguedLines(handled))
+    dropFocusWhenReadOnly(b.textarea)
+    b.textarea.focus()
+    expect(document.activeElement).toBe(b.textarea)
+    act(() => { b.shell.setDraft('/note remember this') })
+    fireEvent.keyDown(b.textarea, { key: 'Enter' })
+    await vi.waitFor(() => { expect(handled).toEqual(['/note remember this']) })
+    await vi.waitFor(() => { expect(b.shell.snapshot.phase).toBe('plain') })
+    expect(b.textarea.getAttribute('contenteditable')).toBe('true')
+    expect(document.activeElement).toBe(b.textarea)
+    expect(b.sink).not.toHaveBeenCalled()
+  })
+
+  it('does not take the keyboard back from a control the person moved to meanwhile', async () => {
+    const handled: string[] = []
+    const b = await scopedBench(handlesArguedLines(handled))
+    dropFocusWhenReadOnly(b.textarea)
+    const other = document.createElement('button')
+    document.body.append(other)
+    onTestFinished(() => { other.remove() })
+    b.textarea.focus()
+    act(() => { b.shell.setDraft('/note remember this') })
+    fireEvent.keyDown(b.textarea, { key: 'Enter' })
+    await vi.waitFor(() => { expect(b.textarea.getAttribute('contenteditable')).toBe('false') })
+    other.focus()
+    await vi.waitFor(() => { expect(b.shell.snapshot.phase).toBe('plain') })
+    expect(document.activeElement).toBe(other)
+  })
+
+  it('a composer that never had the keyboard does not grab it when the line is handled', async () => {
+    const handled: string[] = []
+    const b = await scopedBench(handlesArguedLines(handled))
+    dropFocusWhenReadOnly(b.textarea)
+    b.textarea.blur()
+    act(() => { b.shell.setDraft('/note remember this') })
+    fireEvent.keyDown(b.textarea, { key: 'Enter' })
+    await vi.waitFor(() => { expect(handled).toHaveLength(1) })
+    await vi.waitFor(() => { expect(b.shell.snapshot.phase).toBe('plain') })
+    expect(document.activeElement).not.toBe(b.textarea)
+  })
+})
+
 describe('scenario: images ride an accepting command through the real pipeline', () => {
   it('adjudication reports the image count; the claim chain serializes, submits, and consumes', async () => {
     const b = await bench()
@@ -408,6 +478,146 @@ describe('scenario I: unknown /xyz + enter', () => {
     await vi.waitFor(() => { expect(b.view.getByText('目录预热失败')).toBeTruthy() })
     // Never a silent downgrade: draft retained, sink untouched.
     expect(b.shell.snapshot.draft).toBe('/plan 上线')
+    expect(b.sink).not.toHaveBeenCalled()
+  })
+})
+
+describe('consume-token line guard (text-taking command actions)', () => {
+  it('clears the whole draft when it still equals the adjudicated line (surrounding whitespace aside)', async () => {
+    const b = await bench()
+    act(() => { b.shell.setDraft('/help how do I add a page?  ') })
+    expect(b.shell.consumeToken({ kind: 'line', line: '/help how do I add a page?' })).toBe(true)
+    expect(b.shell.snapshot.draft).toBe('')
+  })
+
+  it('leaves a draft that changed since adjudication alone', async () => {
+    const b = await bench()
+    act(() => { b.shell.setDraft('/help how do I add a page? and a menu') })
+    expect(b.shell.consumeToken({ kind: 'line', line: '/help how do I add a page?' })).toBe(false)
+    expect(b.shell.snapshot.draft).toBe('/help how do I add a page? and a menu')
+  })
+
+  it('never clears on an empty line, and rides the scoped consume-token event like the other guards', async () => {
+    const b = await bench()
+    act(() => { b.shell.setDraft('/help hi') })
+    expect(b.shell.consumeToken({ kind: 'line', line: '' })).toBe(false)
+    const actx = b.runtime.sessions.scope('scenario-s1' as SessionId)!
+    expect(actx.bail(actx, 'slash/input-consume-token', { guard: { kind: 'line', line: '/help hi' } })).toBe(true)
+    expect(b.shell.snapshot.draft).toBe('')
+  })
+})
+
+describe('sent counter (Tracy: InputState.sent)', () => {
+  it('starts at 0 and an empty Enter leaves it there', async () => {
+    const b = await bench()
+    expect(b.shell.state.getSnapshot().sent).toBe(0)
+    fireEvent.keyDown(b.textarea, { key: 'Enter' })
+    await vi.waitFor(() => { expect(b.shell.snapshot.phase).toBe('plain') })
+    expect(b.shell.state.getSnapshot().sent).toBe(0)
+    expect(b.sink).not.toHaveBeenCalled()
+  })
+
+  it('counts an ordinary message once, when it goes out', async () => {
+    const b = await bench()
+    act(() => { b.shell.setDraft('change the footer phone') })
+    fireEvent.keyDown(b.textarea, { key: 'Enter' })
+    await vi.waitFor(() => { expect(b.sink).toHaveBeenCalledTimes(1) })
+    expect(b.shell.state.getSnapshot().sent).toBe(1)
+  })
+
+  it('counts a claimed command once it submits', async () => {
+    const b = await bench()
+    act(() => { b.shell.setDraft('/goal 尽快发布') })
+    fireEvent.keyDown(b.textarea, { key: 'Enter' })
+    await vi.waitFor(() => { expect(b.shell.snapshot.draft).toBe('') })
+    expect(b.shell.state.getSnapshot().sent).toBe(1)
+    expect(b.sink).not.toHaveBeenCalled()
+  })
+
+  it('counts every consumed command token (menu span, bare token, argued line), and no refused one', async () => {
+    const b = await bench()
+    const actx = b.runtime.sessions.scope('scenario-s1' as SessionId)!
+    act(() => { b.shell.setDraft('/model') })
+    const span = { start: 0, end: 6, draftRev: b.shell.snapshot.draftRev }
+    expect(actx.bail(actx, 'slash/input-consume-token', { guard: { kind: 'span', span } })).toBe(true)
+    expect(b.shell.state.getSnapshot().sent).toBe(1)
+    act(() => { b.shell.setDraft('/export') })
+    expect(actx.bail(actx, 'slash/input-consume-token', { guard: { kind: 'bare-token', token: '/export' } })).toBe(true)
+    expect(b.shell.state.getSnapshot().sent).toBe(2)
+    act(() => { b.shell.setDraft('/help how do I undo?') })
+    expect(actx.bail(actx, 'slash/input-consume-token', { guard: { kind: 'line', line: '/help how do I undo?' } })).toBe(true)
+    expect(b.shell.state.getSnapshot().sent).toBe(3)
+    // A guard that no longer matches (the draft moved on, a stale span) consumes nothing and counts nothing.
+    act(() => { b.shell.setDraft('/help how do I undo? and redo') })
+    expect(b.shell.consumeToken({ kind: 'line', line: '/help how do I undo?' })).toBe(false)
+    expect(b.shell.consumeToken({ kind: 'span', span })).toBe(false)
+    expect(b.shell.state.getSnapshot().sent).toBe(3)
+  })
+})
+
+describe('Tracy: a text-taking client action claims its token (help claim)', () => {
+  /**
+   * The ui-commands claim of a `takesText` action at the source boundary: menu pick and Space
+   * return a claim whose submit runs the action locally with the trimmed text and settles success;
+   * no Host execute, no default sink.
+   */
+  function helpSource(run: (text: string) => void) {
+    const claim = (shown: string): CommandClaim => ({
+      name: 'help',
+      token: `/${shown} `,
+      hint: 'ask about Tracy',
+      submit: (args) => {
+        run(args.trim())
+        return Promise.resolve({ kind: 'success' })
+      },
+    })
+    return {
+      trigger: '/' as const,
+      name: 'command',
+      candidates: (_session: ClientSessionContext, req: { query: string }) =>
+        Promise.resolve('help'.startsWith(req.query) ? [{ name: 'help', description: 'Ask' }] : []),
+      onPick: (): PickOutcome => ({ claim: claim('help') }),
+      matchSpace: (_session: ClientSessionContext, token: string): PickOutcome =>
+        token.toLowerCase() === '/help' ? { claim: claim(token.slice(1)) } : undefined,
+      matchEnter: (): Promise<PickOutcome> => Promise.resolve(undefined),
+    }
+  }
+
+  it('a pick keeps "/help " styled with the ghost hint; Enter hands the question over, clears and counts once', async () => {
+    const run = vi.fn()
+    const b = await scopedBench((triggers) => { triggers.registerSource(helpSource(run)) })
+    b.type('/he')
+    await vi.waitFor(() => { expect(b.controller.menu.getSnapshot().open).toBe(true) })
+    act(() => { b.controller.pick('command', 0) })
+    expect(b.shell.snapshot.phase).toBe('claimed')
+    expect(b.shell.snapshot.draft).toBe('/help ')
+    expect(run).not.toHaveBeenCalled()
+    act(() => { b.shell.editor.update(() => {}, { discrete: true }) })
+    expect(b.view.container.querySelector('[data-lexical-text][style*="business-primary"]')?.textContent).toBe('/help ')
+    expect(b.textarea.style.getPropertyValue('--dsh-composer-hint')).toBe(JSON.stringify('ask about Tracy'))
+    b.type('/help how do I undo?')
+    expect(b.shell.snapshot.phase).toBe('claimed')
+    fireEvent.keyDown(b.textarea, { key: 'Enter' })
+    await vi.waitFor(() => { expect(b.shell.snapshot.draft).toBe('') })
+    expect(run).toHaveBeenCalledExactlyOnceWith('how do I undo?')
+    expect(b.shell.snapshot.phase).toBe('plain')
+    expect(b.shell.state.getSnapshot().sent).toBe(1)
+    expect(b.sink).not.toHaveBeenCalled()
+  })
+
+  it('Space after a typed /help claims it; Enter with nothing after the token runs the bare command', async () => {
+    const run = vi.fn()
+    const b = await scopedBench((triggers) => { triggers.registerSource(helpSource(run)) })
+    b.type('/help')
+    fireEvent.keyDown(b.textarea, { key: ' ', keyCode: 32 })
+    // jsdom inserts no character for the key; the claim is what Space decided (scenario H does the same).
+    expect(b.shell.snapshot.phase).toBe('claimed')
+    expect(b.shell.snapshot.claim?.token).toBe('/help ')
+    fireEvent.keyDown(b.textarea, { key: 'Enter' })
+    await vi.waitFor(() => { expect(run).toHaveBeenCalledExactlyOnceWith('') })
+    await vi.waitFor(() => { expect(b.shell.snapshot.phase).toBe('plain') })
+    expect(b.shell.snapshot.draft.trim()).toBe('')
+    expect(b.shell.state.getSnapshot().sent).toBe(1)
     expect(b.sink).not.toHaveBeenCalled()
   })
 })

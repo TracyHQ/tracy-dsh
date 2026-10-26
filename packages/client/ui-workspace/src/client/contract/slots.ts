@@ -50,6 +50,8 @@ import type { SessionSearchResultItem } from '@deepseek-ai/dsh-api-session-contr
 import type { RemoteHostFacts } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SessionActivity, WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { ComponentType, ReactNode } from 'react'
+import type { MenuItemButtonProps } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ShortcutCatalogEntry } from '@deepseek-ai/dsh-client-shortcuts/client'
 import type { WorkspaceShortcutState } from '../shortcuts.ts'
 import type { createWorkspaceViewStore } from '../stores.ts'
@@ -100,6 +102,49 @@ export type UseMenuOpenState = () => MenuOpenState
  */
 export const menuOpenStateFactory: SlotHookFactory<'sidebar.workspaces.session.menu.item', UseMenuOpenState> =
   (_standard, state) => () => state
+
+/** Ids of the shipped Workspace row menu entries. */
+export type WorkspaceMenuShippedId = 'rename' | 'delete'
+
+/**
+ * Tracy: owner share of one Workspace row menu occurrence — the row the menu
+ * belongs to, the shipped rows as rendered elements, and the host's menu row
+ * component so a plugin row matches them.
+ */
+export interface WorkspaceRowMenuOwnerProps {
+  /** The Host Workspace the row shows. */
+  workspaceId: WorkspaceId
+  /** The Workspace's absolute host path. */
+  path: string
+  /** The row's display title. */
+  title: string
+  /**
+   * The rows the shipped entries render, by entry id: Rename (opens the
+   * browser's rename dialog) and Delete workspace (opens its delete
+   * confirmation). Each closes the menu before acting. A plugin entry that
+   * shadows a shipped id renders `shipped[id]` on rows it leaves alone and
+   * `null` on rows it takes over.
+   */
+  shipped: Readonly<Record<WorkspaceMenuShippedId, ReactNode>>
+  /** The host's menu row (ui-primitives `MenuItemButton`): `role="menuitem"`, host styling, keyboard walk. */
+  MenuItem: ComponentType<MenuItemButtonProps>
+}
+
+/**
+ * Bind the Workspace row's open-state pair into its entries'
+ * `useMenuOpenState` hook (same contract as the Session row's).
+ * @param _standard - framework standard props (unused).
+ * @param state - the menu's open-state pair from the render occurrence.
+ * @returns the hook the entry calls.
+ */
+export const workspaceMenuOpenStateFactory: SlotHookFactory<'sidebar.workspaces.workspace.menu.item', UseMenuOpenState> =
+  (_standard, state) => () => state
+
+/** Tracy: owner share of the section label seat. */
+export interface SectionLabelOwnerProps {
+  /** The shipped label (`section.workspaces`), already translated; the seat's fallback when empty. */
+  label: string
+}
 
 /**
  * Owner share of the two Session-row schedule seats. Both receive only the
@@ -174,6 +219,36 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
       } }
     }
     /**
+     * Tracy: the rows of one Workspace row's "..." menu, in ascending `order`.
+     * ui-workspace registers the shipped rows here — `rename` (100) and
+     * `delete` (200) — each rendering the matching element of the owner's
+     * `shipped`, so with nothing else registered the menu is unchanged. A
+     * plugin row lands among them by `order`. To replace a shipped row on
+     * some Workspace rows, register the same `id` at a `priority` below 0 (a
+     * list cell renders its lowest priority) and render `shipped[id]` on the
+     * rows you leave alone, `null` on the rows you take over — every entry
+     * decides per row from the owner share (`workspaceId`, `path`, `title`).
+     * Render rows with the owner's `MenuItem` and dismiss the menu through
+     * the injected `useMenuOpenState` hook after acting. While the list has
+     * no registration at all the row draws no "..." trigger.
+     */
+    'sidebar.workspaces.workspace.menu.item': {
+      kind: 'list'
+      scope: 'root'
+      owner: WorkspaceRowMenuOwnerProps
+      hookContext: MenuOpenState
+      inject: { hooks: {
+        menuOpenState: SlotHookFactory<'sidebar.workspaces.workspace.menu.item', UseMenuOpenState>
+      } }
+    }
+    /**
+     * Tracy: the browser's section label in the grouped views (the flat view
+     * keeps its own label). Empty, the browser shows the owner's `label`
+     * (`section.workspaces`); an occupant renders the text to show instead,
+     * or `label` to keep it.
+     */
+    'sidebar.workspaces.section.label': { kind: 'single'; scope: 'root'; owner: SectionLabelOwnerProps }
+    /**
      * The hover buttons at the end of one Session row, in ascending `order`,
      * after the "..." menu trigger. ui-workspace registers `archive` (100) and
      * `pin` (200) here. An entry renders one icon button (or nothing, when its
@@ -222,6 +297,8 @@ export type WorkspaceBrowserInjected = {
      */
     hostInfo: HostObservable<RemoteHostFacts>
     workspaceShortcuts: HostObservable<WorkspaceShortcutState>
+    /** Tracy: true while `sidebar.workspaces.workspace.menu.item` has any registration; false hides every Workspace row's "..." trigger. */
+    workspaceMenu: HostObservable<boolean>
     shortcuts: HostObservable<readonly ShortcutCatalogEntry[]>
   }
   /** Open the browser search and focus its input. */
@@ -457,6 +534,8 @@ export type WorkspaceBrowserProps =
     | 'sidebar.workspaces.directoryFlow'
     | 'sidebar.workspaces.session.menu.item'
     | 'sidebar.workspaces.session.row.action'
+    | 'sidebar.workspaces.workspace.menu.item'
+    | 'sidebar.workspaces.section.label'
     | 'sidebar.session.row.leading'
     | 'sidebar.session.row.hover'
   >

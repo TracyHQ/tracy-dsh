@@ -61,6 +61,24 @@ function isQuestionDraftProgress(value: unknown, questionCount: number): value i
   })
 }
 
+/**
+ * Display label and recommendation state of one option. The question's own
+ * `recommended` field decides when present; otherwise the label suffix does.
+ * The suffix is stripped from the display either way, never from the answer.
+ * @param question - Question the option belongs to.
+ * @param label - Original option label returned if selected.
+ * @returns Display label plus recommendation state.
+ */
+export function optionDisplay(
+  question: Pick<PendingQuestion['questions'][number], 'recommended'>,
+  label: string,
+): { label: string; recommended: boolean } {
+  const parsed = parseRecommendedLabel(label)
+  return question.recommended === undefined
+    ? parsed
+    : { label: parsed.label, recommended: question.recommended === label }
+}
+
 /** Return whether a text-field key event belongs to an active IME composition. */
 function isComposing(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
   // keyCode 229 is the legacy IME-composition signal engines emit without isComposing.
@@ -498,7 +516,7 @@ function QuestionFlow({ pending, t, useStore, useQuestionCard, actions }: Questi
               <div className={css.options} role={question.multiSelect === true ? 'group' : 'radiogroup'}>
                 {(question.options ?? []).map((option, optionIndex) => {
                   const selected = draft.selected.includes(option.label)
-                  const display = parseRecommendedLabel(option.label)
+                  const display = optionDisplay(question, option.label)
                   return (
                     <button
                       type="button" key={`${option.label}-${String(optionIndex)}`}

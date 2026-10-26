@@ -19,6 +19,48 @@ import { renderIndexInjections, type IndexInjection } from './injections.ts'
 export { renderIndexInjections } from './injections.ts'
 export type { IndexInjection, IndexInjectionPlacement } from './injections.ts'
 
+/**
+ * The header a reverse proxy uses to say which path prefix it published this
+ * server under (`https://host/<prefix>/…`). Routes stay registered at the root;
+ * the server removes the prefix from `req.url` before matching, so route owners
+ * never see it, and hands it back through {@link WebServer.mountOf} to the few
+ * handlers that build absolute URLs (the `<base>` tag, cookie paths, redirects).
+ */
+export const FORWARDED_PREFIX_HEADER = 'x-forwarded-prefix'
+
+/**
+ * A mount prefix is an absolute path of plain segments: no trailing slash, no
+ * dot-only segments, no query, no scheme. Anything else is ignored outright —
+ * applying half of a malformed prefix would route to somewhere nobody named.
+ */
+const MOUNT_PREFIX = /^(?:\/[A-Za-z0-9._~-]*[A-Za-z0-9_~-][A-Za-z0-9._~-]*)+$/
+
+/**
+ * Only a peer on this host is believed about the prefix — a reverse proxy in
+ * front of dsh, never a browser across the network. A forged value could at
+ * most change the page its own sender gets; the check keeps it from reaching
+ * the routing of anyone else's request.
+ */
+const LOOPBACK_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
+
+/**
+ * Take a trusted proxy's mount prefix off `req.url`, in place.
+ * @param req - the incoming request; its `url` is rewritten when a prefix applies.
+ * @returns the prefix removed, or '' when none applied.
+ */
+function unmount(req: IncomingMessage): string {
+  const raw = req.headers[FORWARDED_PREFIX_HEADER]
+  const prefix = Array.isArray(raw) ? raw[0] : raw
+  if (prefix === undefined || !MOUNT_PREFIX.test(prefix)) return ''
+  if (!LOOPBACK_PEERS.has(req.socket.remoteAddress ?? '')) return ''
+  /* v8 ignore next -- node:http always sets url on server requests. */
+  const url = req.url ?? '/'
+  if (url !== prefix && !url.startsWith(`${prefix}/`) && !url.startsWith(`${prefix}?`)) return ''
+  const rest = url.slice(prefix.length)
+  req.url = rest === '' || rest.startsWith('?') ? `/${rest}` : rest
+  return prefix
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     webServer: WebServer
@@ -136,6 +178,7 @@ export class WebServer extends Service {
   private readonly upgrades = new Map<string, WebUpgradeRoute>()
   private readonly upgradedSockets = new Set<Duplex>()
   private readonly indexTaps: ((html: string) => string)[] = []
+  private readonly mounts = new WeakMap<IncomingMessage, string>()
   private fallback: WebRoute['handler'] | undefined
   private server!: Server
   private listenedPort!: number
@@ -155,6 +198,19 @@ export class WebServer extends Service {
   /** The configured bind host (the loopback or all-interfaces literal). */
   get host(): Config['host'] {
     return this.config.host
+  }
+
+  /**
+   * The path prefix a trusted proxy mounted this request under — '' at the
+   * root, else an absolute path with no trailing slash (`/site.example`). It
+   * was already removed from `req.url`; handlers that emit absolute URLs put
+   * it back in front of theirs, so a page served at `/site.example/` links to
+   * `/site.example/api` and not to the root of a host that has no `/api`.
+   * @param req - a request (or upgrade request) this server is handling.
+   * @returns the mount prefix, or '' when none applied.
+   */
+  mountOf(req: IncomingMessage): string {
+    return this.mounts.get(req) ?? ''
   }
 
   /**
@@ -220,6 +276,7 @@ export class WebServer extends Service {
   /** Listen; resolves once the socket is bound (rejection = FAILED fiber). */
   async [Service.init](): Promise<void> {
     const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      this.mounts.set(req, unmount(req))
       /* v8 ignore next -- `?? '/'` arm: node:http always sets url on server
       requests; the field is only optional on the client-side IncomingMessage type */
       const rawPath = new URL(req.url ?? '/', 'http://x').pathname
@@ -267,6 +324,7 @@ export class WebServer extends Service {
       })
       let route: WebUpgradeRoute | undefined
       try {
+        this.mounts.set(req, unmount(req))
         /* v8 ignore next -- node:http always sets url on server requests. */
         route = this.upgrades.get(new URL(req.url ?? '/', 'http://x').pathname)
       } catch (error) {

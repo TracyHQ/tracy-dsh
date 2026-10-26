@@ -41,7 +41,7 @@ export interface MessageFeedbackInjected {
   retract: (messageId: MessageId, rating: MessageFeedbackRating) => Promise<MessageFeedbackActionResult>
   /**
    * Open the Session's feedback dialog for one message and judgment; its
-   * submission records that rating with the dialog's category and text.
+   * submission records that rating with the dialog's categories and text.
    * @param messageId - target assistant message.
    * @param rating - judgment to record on submission.
    */
@@ -61,10 +61,10 @@ export interface FeedbackDialogInjected {
     dialog: HostObservable<FeedbackDialogState>
   }
   /**
-   * Replace part of the draft: the category (null clears it) or the text.
+   * Replace part of the draft: selected categories or the text.
    * @param draft - the members to replace.
    */
-  edit: (draft: Partial<Pick<FeedbackDialogState, 'category' | 'text'>>) => void
+  edit: (draft: Partial<Pick<FeedbackDialogState, 'categories' | 'text'>>) => void
   /** Submit the draft to the open target. */
   submit: () => Promise<void>
   /** Close the dialog and discard the draft. */

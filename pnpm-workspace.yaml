@@ -18,6 +18,33 @@ overrides:
   'extract-zip>yauzl': '3.4.0'
   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'
   '@deepseek-ai/schemastery': 'link:vendor/schemastery'
+  # Published security fixes for indirect dependencies: each selector covers only the vulnerable
+  # range of one major line and lifts it to the first fixed release of that same line. Delete an
+  # entry once every path to it resolves to a fixed release on its own.
+  '@hono/node-server@<1.19.15': '1.19.15'
+  '@modelcontextprotocol/sdk@>=1.12.0 <1.31.0': '1.31.0'
+  'baseline-browser-mapping@>=2.0.0 <2.11.0': '2.11.0'
+  'brace-expansion@<1.1.21': '1.1.21'
+  'brace-expansion@>=2.0.0 <2.1.7': '2.1.7'
+  'brace-expansion@>=5.0.0 <5.0.12': '5.0.12'
+  'browserslist@<4.28.7': '4.28.7'
+  'dompurify@>=3.0.0 <3.4.16': '3.4.16'
+  'fast-uri@>=3.0.0 <3.1.8': '3.1.8'
+  'fflate@>=0.8.0 <0.8.3': '0.8.3'
+  # 4.12.34 fixes some advisories, but the rest are fixed only from 4.13.5 / 4.13.7.
+  'hono@>=4.0.0 <4.13.7': '4.13.7'
+  # 4.2.1 was never published; 4.3.0 is the first fixed release of the 4.x line.
+  'http-cache-semantics@<4.2.1': '4.3.0'
+  'ip-address@>=10.0.0 <10.7.1': '10.7.1'
+  'js-yaml@>=4.0.0 <4.3.2': '4.3.2'
+  'nanoid@>=3.0.0 <3.3.18': '3.3.18'
+  'postcss@>=8.0.0 <8.5.23': '8.5.23'
+  'protobufjs@>=7.0.0 <7.6.5': '7.6.5'
+  'qs@>=6.0.0 <6.16.0': '6.16.0'
+  'source-map-js@>=1.0.0 <1.2.2': '1.2.2'
+  'undici@>=6.0.0 <6.28.1': '6.28.1'
+  'undici@>=7.0.0 <7.29.1': '7.29.1'
+  'undici@>=8.0.0 <8.10.2': '8.10.2'
 
 peerDependencyRules:
   allowedVersions:

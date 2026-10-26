@@ -1,7 +1,8 @@
 import { MessageId, createMessage } from '@deepseek-ai/dsh-llm'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { appendFile, mkdtemp, mkdir, rm, readFile, writeFile, readdir, stat, symlink } from 'node:fs/promises'
+import { appendFile, mkdtemp, mkdir, open, rename, rm, readFile, writeFile, readdir, stat, symlink } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { scheduler } from 'node:timers/promises'
@@ -39,6 +40,18 @@ const readdirFailure = vi.hoisted(() => ({
   error: undefined as Error | undefined,
 }))
 
+/** Runs `after` once a real stat of `path` has settled and before the caller receives it. */
+const statSettled = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  after: undefined as (() => Promise<void>) | undefined,
+}))
+
+/** Counts directory reads of `path`. */
+const readdirTally = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  count: 0,
+}))
+
 const readTally = vi.hoisted(() => ({
   /** Physical whole-file reads per path suffix; keyed by session id segment. */
   bySuffix: new Map<string, number>(),
@@ -67,6 +80,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     stat: (async (...args: Parameters<typeof actual.stat>) => {
       if (String(args[0]) === statFailure.path && statFailure.error !== undefined) throw statFailure.error
       const identity = await actual.stat(...args)
+      if (String(args[0]) === statSettled.path) await statSettled.after?.()
       if (String(args[0]) !== statRace.path || !('mtimeNs' in identity)) return identity
       statRace.reads += 1
       if (statRace.mode === 'churn') return { ...identity, mtimeNs: identity.mtimeNs + BigInt(statRace.reads) }
@@ -95,6 +109,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       }
     }) as typeof actual.readFile,
     readdir: (async (...args: Parameters<typeof actual.readdir>) => {
+      if (String(args[0]) === readdirTally.path) readdirTally.count += 1
       if (String(args[0]) === readdirFailure.path && readdirFailure.error !== undefined) {
         throw readdirFailure.error
       }
@@ -159,6 +174,23 @@ function pausePhysicalRead(path: string): {
     finished: finished.promise,
     release: () => { resume.resolve(undefined) },
   }
+}
+
+/** `FileHandle.read` as a header read calls it. */
+type HandleRead = (
+  this: FileHandle,
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  position: number | null,
+) => Promise<{ bytesRead: number; buffer: Buffer }>
+
+/** Spy on every `FileHandle.read` through the prototype a handle opened on `path` shares. */
+async function spyOnHandleReads(path: string): Promise<MockInstance<HandleRead>> {
+  const probe = await open(path, 'r')
+  const prototype = Object.getPrototypeOf(probe) as { read: HandleRead }
+  await probe.close()
+  return vi.spyOn(prototype, 'read')
 }
 
 function rawLogPath(root: string, cwd: string | undefined, id: SessionId): string {
@@ -302,6 +334,10 @@ afterEach(async () => {
   statFailure.error = undefined
   readdirFailure.path = undefined
   readdirFailure.error = undefined
+  statSettled.path = undefined
+  statSettled.after = undefined
+  readdirTally.path = undefined
+  readdirTally.count = 0
   vi.restoreAllMocks()
   const results = await Promise.allSettled(contexts.map(ctx => ctx.fiber.dispose()))
   for (const d of directories) await rm(d, { recursive: true, force: true })
@@ -1230,6 +1266,26 @@ describe('JsonlSessionPersistence: immutable format generations', () => {
     await expect(ctx.sessionPersistence.stat(parent.id)).rejects.toBe(statFailure.error)
   })
 
+  it('fingerprints a corpus member that disappears during listing into historical list revisions', async () => {
+    const parent = meta('list-corpus-parent', '/work')
+    const child = meta('list-corpus-child', '/work')
+    for (const header of [parent, child]) {
+      const path = historicalLogPath(root, header.cwd, header.id)
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, `${JSON.stringify(releasedV0Header(header))}\n`)
+    }
+    const revisionOf = async (): Promise<unknown> =>
+      (await ctx.sessionPersistence.list()).find(snapshot => snapshot.header.id === parent.id)?.revision
+    const present = await revisionOf()
+    statFailure.path = historicalLogPath(root, child.cwd, child.id)
+    statFailure.error = Object.assign(new Error('member disappeared'), { code: 'ENOENT' })
+
+    expect((await ctx.sessionPersistence.list()).map(snapshot => snapshot.header.id)).toEqual([parent.id])
+    const missing = await revisionOf()
+    expect(missing).not.toBe(present)
+    expect(missing).toBe((await ctx.sessionPersistence.stat(parent.id))?.revision)
+  })
+
   it('surfaces source-read storage faults and aborts unwrapped during migration', async () => {
     const header = meta('source-read-fault', '/work')
     const sourcePath = historicalLogPath(root, header.cwd, header.id)
@@ -1971,49 +2027,35 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
   it('omits a listed artifact removed after discovery', async () => {
     const m = meta('vanishing-snapshot')
     await writeLog(ctx.sessionPersistence, m, oneTurnLog())
-    const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
-    }
-    const listArtifacts = persistence.listArtifacts.bind(persistence)
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockImplementation(async () => {
-      const artifacts = await listArtifacts()
-      await rm(artifacts[0]!.path)
-      return artifacts
-    })
+    statFailure.path = rawLogPath(root, m.cwd, m.id)
+    statFailure.error = Object.assign(new Error('ENOENT: removed after discovery'), { code: 'ENOENT' })
 
     await expect(ctx.sessionPersistence.list()).resolves.toEqual([])
-    discovery.mockRestore()
   })
 
   it('surfaces non-ENOENT stat failures during listing', async () => {
-    const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
-    }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([{
-      header: meta('snapshot-stat-failure'),
-      path: `${root}\0snapshot-stat-failure`,
-    }])
+    const m = meta('snapshot-stat-failure')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    statFailure.path = rawLogPath(root, m.cwd, m.id)
+    statFailure.error = Object.assign(new Error('EACCES: denied'), { code: 'EACCES' })
 
-    await expect(ctx.sessionPersistence.list()).rejects.toThrow(/null bytes/)
-    discovery.mockRestore()
+    await expect(ctx.sessionPersistence.list()).rejects.toBe(statFailure.error)
   })
 
   it('forwards list cancellation and awaits in-flight discovery cleanup', async () => {
-    const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>>
-    }
-    const started = Promise.withResolvers<AbortSignal>()
+    const m = meta('snapshot-in-flight-cancellation')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const started = Promise.withResolvers<undefined>()
     const cleanup = Promise.withResolvers<undefined>()
-    vi.spyOn(persistence, 'listArtifacts').mockImplementation(async (signal) => {
-      if (signal === undefined) throw new Error('expected list signal')
-      started.resolve(signal)
+    statSettled.path = rawLogPath(root, m.cwd, m.id)
+    statSettled.after = async () => {
+      started.resolve(undefined)
       await cleanup.promise
-      return []
-    })
+    }
     const reason = new Error('JSONL list discovery cancelled')
     const controller = new AbortController()
     const pending = ctx.sessionPersistence.list({ signal: controller.signal })
-    expect(await started.promise).toBe(controller.signal)
+    await started.promise
     let settled = false
     void pending.then(
       () => { settled = true },
@@ -2031,20 +2073,86 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
   it('checks cancellation after an uncancellable list stat settles', async () => {
     const m = meta('snapshot-stat-cancellation')
     await writeLog(ctx.sessionPersistence, m, oneTurnLog())
-    const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>>
-    }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([{
-      header: m,
-      path: rawLogPath(root, m.cwd, m.id),
-    }])
     const reason = new Error('JSONL list stat cancelled')
     const controller = new AbortController()
-    const pending = ctx.sessionPersistence.list({ signal: controller.signal })
-    queueMicrotask(() => { controller.abort(reason) })
+    const read = await spyOnHandleReads(rawLogPath(root, m.cwd, m.id))
+    statSettled.path = rawLogPath(root, m.cwd, m.id)
+    statSettled.after = async () => { controller.abort(reason) }
 
-    await expect(pending).rejects.toBe(reason)
-    expect(discovery).toHaveBeenCalledWith(controller.signal)
+    await expect(ctx.sessionPersistence.list({ signal: controller.signal })).rejects.toBe(reason)
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  it('reads no log header when a second list finds every file unchanged', async () => {
+    const headers = Array.from({ length: 20 }, (_, index) => meta(`unchanged-list-${String(index)}`, '/work'))
+    for (const header of headers) await writeLog(ctx.sessionPersistence, header, oneTurnLog())
+    const first = await ctx.sessionPersistence.list()
+    const read = await spyOnHandleReads(rawLogPath(root, '/work', headers[0]!.id))
+
+    const second = await ctx.sessionPersistence.list()
+
+    expect(read).not.toHaveBeenCalled()
+    expect(first).toHaveLength(20)
+    expect(second).toEqual(first)
+  })
+
+  it('rereads only the header of a log that changed since the previous list', async () => {
+    const changed = meta('appended-since-list', '/work')
+    const idle = meta('idle-since-list', '/work')
+    await writeLog(ctx.sessionPersistence, changed, oneTurnLog())
+    await writeLog(ctx.sessionPersistence, idle, oneTurnLog())
+    const before = await ctx.sessionPersistence.list()
+    await appendFile(rawLogPath(root, '/work', changed.id), '{"type":"assistant/chunk","seq":8,"ti')
+    const read = await spyOnHandleReads(rawLogPath(root, '/work', idle.id))
+
+    const after = await ctx.sessionPersistence.list()
+
+    expect(read).toHaveBeenCalledTimes(1)
+    const revisionOf = (snapshots: typeof before, id: SessionId): unknown =>
+      snapshots.find(snapshot => snapshot.header.id === id)?.revision
+    expect(revisionOf(after, changed.id)).not.toBe(revisionOf(before, changed.id))
+    expect(revisionOf(after, idle.id)).toBe(revisionOf(before, idle.id))
+  })
+
+  it('reads the new header of a same-size log renamed over the listed path', async () => {
+    const original = meta('replaced-since-list', '/work')
+    await writeLog(ctx.sessionPersistence, original, oneTurnLog())
+    const path = rawLogPath(root, '/work', original.id)
+    const [listed] = (await ctx.sessionPersistence.list()).map(snapshot => snapshot.header)
+    expect(listed?.createdAt).toBe(1000)
+    const replacement = `${path}.replacement`
+    await writeFile(replacement, (await readFile(path, 'utf8')).replace('"createdAt":1000', '"createdAt":1001'))
+    expect((await stat(replacement)).size).toBe((await stat(path)).size)
+    await rename(replacement, path)
+
+    expect((await ctx.sessionPersistence.list()).map(snapshot => snapshot.header))
+      .toEqual([{ ...listed, createdAt: 1001 }])
+  })
+
+  it('enumerates the root once per list and fingerprints historical revisions as stat does', async () => {
+    const historical = meta('historical-in-list', '/work')
+    const sourcePath = historicalLogPath(root, historical.cwd, historical.id)
+    await mkdir(dirname(sourcePath), { recursive: true })
+    await writeFile(sourcePath, `${JSON.stringify(releasedV0Header(historical))}\n`)
+    await writeLog(ctx.sessionPersistence, meta('current-in-list', '/work'), oneTurnLog())
+    await ctx.sessionPersistence.list()
+    readdirTally.path = root
+
+    const listed = await ctx.sessionPersistence.list()
+
+    expect(readdirTally.count).toBe(1)
+    const snapshot = listed.find(entry => entry.header.id === historical.id)
+    expect(snapshot?.revision).toBe((await ctx.sessionPersistence.stat(historical.id))?.revision)
+  })
+
+  it('hands each list caller its own header object', async () => {
+    const m = meta('detached-list-header', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const [first] = await ctx.sessionPersistence.list()
+    const listed = { ...first!.header }
+    mutableHeader(first!.header).createdAt = 5
+
+    expect((await ctx.sessionPersistence.list()).map(snapshot => snapshot.header)).toEqual([listed])
   })
 })
 

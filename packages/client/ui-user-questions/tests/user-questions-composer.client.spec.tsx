@@ -8,7 +8,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { AskUserQuestionAnswerItem } from '@deepseek-ai/dsh-user-questions/types'
 import { createWaterfallRequest, PendingQuestion, type QuestionCardSnapshot, type QuestionComposerProps } from '../src/client/contract/slots.ts'
 import { createQuestionDraftStore } from '../src/client/draft-store.ts'
-import { QuestionComposer as Composer, parseRecommendedLabel } from '../src/client/QuestionComposer.tsx'
+import { QuestionComposer as Composer, optionDisplay, parseRecommendedLabel } from '../src/client/QuestionComposer.tsx'
 import { en, zh } from '../src/client/locales.ts'
 import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
@@ -543,6 +543,44 @@ describe('PendingQuestion domain face', () => {
       { id: 'detail', custom: '要能独立排查线上问题', selected: [] },
       { id: 'signals', selected: ['系统设计'] },
     ]))
+  })
+})
+
+describe('recommended option', () => {
+  it('tags the option named by the question\'s recommended field over a label suffix', () => {
+    const { carrier, answer } = wait([{
+      id: 'profile', question: '选择候选人类型', recommended: '研究潜力型',
+      options: [{ label: '工程落地型 (Recommended)' }, { label: '研究潜力型' }],
+    }])
+    render(<QuestionComposer matched={carrier} {...kit} />)
+
+    expect(screen.getAllByText('推荐')).toHaveLength(1)
+    expect(screen.getByRole('radio', { name: '研究潜力型' }).textContent).toContain('推荐')
+    expect(screen.getByRole('radio', { name: '工程落地型' }).textContent).not.toContain('推荐')
+
+    fireEvent.click(screen.getByRole('radio', { name: '研究潜力型' }))
+    fireEvent.click(screen.getByRole('button', { name: '提交' }))
+    // The answer shape is unchanged: the raw label, no action.
+    expect(answer).toHaveBeenCalledWith(answerBatch([{ id: 'profile', selected: ['研究潜力型'] }]))
+  })
+
+  it('falls back to the label suffix when the question names no recommended option', () => {
+    const { carrier } = wait([{
+      id: 'profile', question: '选择候选人类型',
+      options: [{ label: '工程落地型 (Recommended)' }, { label: '研究潜力型' }],
+    }])
+    render(<QuestionComposer matched={carrier} {...kit} />)
+
+    expect(screen.getAllByText('推荐')).toHaveLength(1)
+    expect(screen.getByRole('radio', { name: '工程落地型' }).textContent).toContain('推荐')
+  })
+
+  it('optionDisplay strips the suffix from the display in both modes', () => {
+    expect(optionDisplay({}, 'Fast (Recommended)')).toEqual({ label: 'Fast', recommended: true })
+    expect(optionDisplay({ recommended: 'Safe' }, 'Fast (Recommended)')).toEqual({ label: 'Fast', recommended: false })
+    expect(optionDisplay({ recommended: 'Safe' }, 'Safe')).toEqual({ label: 'Safe', recommended: true })
+    expect(optionDisplay({ recommended: 'Fast (Recommended)' }, 'Fast (Recommended)'))
+      .toEqual({ label: 'Fast', recommended: true })
   })
 })
 

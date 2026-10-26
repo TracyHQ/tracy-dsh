@@ -48,6 +48,15 @@ export interface AskUserQuestionItem {
   options?: AskUserQuestionOption[]
   /** Whether more than one option may be selected. Defaults to single-select. */
   multiSelect?: boolean
+  /**
+   * Label of the option the asker would pick itself; capable UIs show it as the
+   * default. Should equal one of `options[].label`; `ask()` rewrites a value
+   * that plainly means exactly one option (case, a trailing "(Recommended)"-style
+   * note, the label's opening words) to that exact label, and drops one that
+   * names none or several. Takes precedence over the legacy "(Recommended)"
+   * label suffix, which stays on the label untouched.
+   */
+  recommended?: string
   /** Optional presentation intent for capable UIs; absent asks for the generic option list. */
   intent?: AskUserQuestionIntent
 }
@@ -62,10 +71,21 @@ export interface AskUserQuestionAnswerItem {
   custom?: string
 }
 
+/**
+ * How the human closed the request: `submit` answered the questions,
+ * `decide` left the unanswered ones to the asker, `follow_up` asked for
+ * further questions before deciding.
+ */
+export type AskUserQuestionAction = 'submit' | 'decide' | 'follow_up'
+
 /** The human's answer. */
 export interface AskUserQuestionAnswer {
   /** Structured answers keyed by question id. */
   answers: AskUserQuestionAnswerItem[]
+  /** How the request was closed; absent means `submit`, so older answerers keep working. */
+  action?: AskUserQuestionAction
+  /** Optional free-text note the human attached to the whole request. */
+  note?: string
 }
 
 /** `open` while the tool call may still return the answer; `continued` once the answer can only arrive as a new turn. */

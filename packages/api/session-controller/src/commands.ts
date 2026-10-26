@@ -52,6 +52,7 @@ import type {
   SessionUpdateQueueRequest,
   SessionUpdateQueueValue,
   SessionRequestId,
+  PromptPrompter,
 } from './types.ts'
 
 interface SessionReadState {
@@ -326,12 +327,23 @@ export class SessionCommandController {
         { value: request.clientTimeZone },
       )
     }
+    // A stamp the Host cannot read is a bug in the gate upstream, not a person: refuse out loud
+    // rather than log a source nobody can act on.
+    const prompter = request.prompter === undefined ? undefined : readPrompter(request.prompter)
+    if (request.prompter !== undefined && prompter === undefined) {
+      throw new RemoteError(
+        'session/invalid-prompter',
+        'prompter must be { user: non-empty string, email?: address | null }',
+        {},
+      )
+    }
     const agent = await this.resolveAgent(request.sessionId)
     if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
     const source: MessageSource = {
       kind: 'user',
       rpcId: request.requestId,
       ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
+      ...(prompter === undefined ? {} : { prompter }),
     }
     const hasImage = request.content.some(part => part.type === 'image')
     const admit = async (): Promise<SessionPromptValue> => {
@@ -362,6 +374,7 @@ export class SessionCommandController {
         }
         using binding = this.ctx.fileUploads.bindPrompt(agent, admission.receiptIds, request.requestId)
         if (request.mode === 'steer') agent.steer(message)
+        else if (this.holdsPrompts(agent.id)) agent.send(message, 'next-turn', false)
         else agent.followup(message)
         binding.commit()
       } catch (error) {
@@ -501,6 +514,29 @@ export class SessionCommandController {
         assertNever(request.action, 'queue action')
     }
     return { accepted: true }
+  }
+
+  /**
+   * Wake one idle Agent whose next-turn queue holds follow-ups that
+   * `api-session/prompt-hold` kept from waking it. The pending follow-ups are
+   * re-queued in their original order and the last one wakes the driver, so
+   * each runs exactly once as its own turn. A cold Session is resumed first.
+   * @param sessionId - Session whose held follow-ups are released.
+   * @returns the number of follow-ups released: 0 while a hold listener still
+   *   holds, while the Agent is running (its driver claims them), or when none is pending.
+   */
+  async releaseHeldPrompts(sessionId: SessionId): Promise<number> {
+    if (this.holdsPrompts(sessionId)) return 0
+    const agent = await this.resolveAgent(sessionId)
+    if (agent.status !== 'idle' || agent.inbox.nextTurn.length === 0) return 0
+    const pending = agent.inbox.splice('next-turn', 0, Infinity, [])
+    pending.forEach((message, index) => { agent.send(message, 'next-turn', index === pending.length - 1) })
+    return pending.length
+  }
+
+  /** Whether an `api-session/prompt-hold` listener holds follow-ups for this Session. */
+  private holdsPrompts(sessionId: SessionId): boolean {
+    return this.ctx.bail('api-session/prompt-hold', sessionId) === true
   }
 
   /**
@@ -688,4 +724,24 @@ function referencedImage(
     if (found !== undefined) return found
   }
   return undefined
+}
+
+/** Bounds that keep a stamp a name and an address, not a payload. */
+const PROMPTER_USER_MAX = 200
+const PROMPTER_EMAIL_MAX = 320
+const PROMPTER_EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+
+/**
+ * The gate's stamp, read defensively: `user` a non-empty string, `email` an address, null, or
+ * absent. Anything else answers undefined so the caller can refuse it by name.
+ */
+function readPrompter(raw: unknown): PromptPrompter | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const user = (raw as { user?: unknown }).user
+  if (typeof user !== 'string' || user.trim() === '' || user.length > PROMPTER_USER_MAX) return undefined
+  const email = (raw as { email?: unknown }).email
+  if (email === undefined) return { user }
+  if (email === null) return { user, email: null }
+  if (typeof email !== 'string' || email.length > PROMPTER_EMAIL_MAX || !PROMPTER_EMAIL.test(email)) return undefined
+  return { user, email }
 }

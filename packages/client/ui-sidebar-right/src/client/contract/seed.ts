@@ -32,6 +32,23 @@ export function defaultSeed(tabs: SidebarRightTabRegistry): SidebarRightSeed {
   return { kind, title: definition.title(pageAddress(kind)) }
 }
 
+/**
+ * Whether the registry offers anything a person could open: at least one type
+ * contributed a guide entry.
+ *
+ * Without one, the default page `defaultSeed` falls back to is a guide that
+ * lists nothing — a product that disables every shipped tab type reaches this
+ * state — and a column expanded onto it presents a blank pane. The store reads
+ * this to refuse such an expansion (`stores.ts`), and the expand button to not
+ * offer it. Content opened by address is unaffected: a preview is something to
+ * show whether or not there is a door to it.
+ * @param tabs - current tab registry.
+ * @returns `true` when at least one guide entry is registered.
+ */
+export function hasDoors(tabs: SidebarRightTabRegistry): boolean {
+  return tabs.guide().length > 0
+}
+
 /** The guide tab's kind. */
 export const GUIDE_KIND = 'guide'
 

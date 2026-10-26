@@ -32,7 +32,7 @@ const SESSION = 's-test' as SessionId
 const t = ((key: string) => key) as Parameters<typeof guideDefinition>[0]
 
 /** A controller over a real registry and a real store, adopted as the runtime mints it. */
-function harness() {
+function harness(host: { autoFullscreen?: () => boolean; userGesture?: () => boolean } = {}) {
   const ctx = new Context()
   const tabs = new SidebarRightTabRegistry(ctx)
   tabs.register(guideDefinition(t))
@@ -49,6 +49,7 @@ function harness() {
   const pin = vi.fn<(address: string, signal: AbortSignal) => void>()
   const { controller, adopt, show, measure } = createSidebarRightController(tabs, pin, {
     autoFullscreen: () => false,
+    ...host,
     openWithFocus: (_sessionId, open) => { open() },
     closeWithFocus: (_sessionId, _paneId, close) => { close() },
   })
@@ -83,7 +84,50 @@ function harness() {
   return { controller, adopt, unadopt, show, measure, tabs, instance, pin, publish, titles, tabOf, layout, entries, room, expand }
 }
 
+describe('SidebarRightController — opening on a narrow frame (Tracy)', () => {
+  // TCH K1 (ACC-30.C2a, 03/10/2026): at 360px the panel is presented fullscreen, and a site's preview
+  // opened by code on page load covered the chat box until the person found the toggle.
+  it('places an open no gesture caused without covering the conversation', () => {
+    const h = harness({ autoFullscreen: () => true, userGesture: () => false })
+    h.publish()
+    h.controller.openTab('guide')
+    expect(h.titles()).toContain('tab.guide.title')
+    expect(h.layout().expanded).toBe(false)
+  })
+
+  it('still reveals an open the person pressed for, and any open on a wide frame', () => {
+    const pressed = harness({ autoFullscreen: () => true, userGesture: () => true })
+    pressed.publish()
+    pressed.controller.openTab('guide')
+    expect(pressed.layout().expanded).toBe(true)
+    const wide = harness({ autoFullscreen: () => false, userGesture: () => false })
+    wide.publish()
+    wide.controller.openTab('guide')
+    expect(wide.layout().expanded).toBe(true)
+  })
+
+  it('leaves an already expanded panel expanded', () => {
+    const h = harness({ autoFullscreen: () => true, userGesture: () => false })
+    h.publish()
+    h.expand()
+    h.controller.openResource('dsh-resource://file/session/s-test/a.txt')
+    expect(h.layout().expanded).toBe(true)
+  })
+})
+
 describe('SidebarRightController — opening', () => {
+  it('keeps registered pages openable when the launcher offers only selected kinds', () => {
+    const h = harness()
+    h.tabs.register({ id: 'test/team', kind: 'team', title: () => 'Team' })
+    const release = h.controller.registerLauncher({ kinds: ['add-site', 'inspiration'], label: 'Open a tab', emptyLabel: 'Click + to start' })
+    h.publish()
+    h.controller.openTab('team')
+    expect(h.titles()).toContain('Team')
+    expect(h.controller.launcher.getSnapshot()?.kinds).toEqual(['add-site', 'inspiration'])
+    release()
+    expect(h.controller.launcher.getSnapshot()).toBeUndefined()
+  })
+
   it('keeps independently opened instances distinct when they return to the same pane', () => {
     const h = harness()
     h.tabs.register({ id: 'test/terminal', kind: 'terminal', multiple: true, title: () => 'terminal' })

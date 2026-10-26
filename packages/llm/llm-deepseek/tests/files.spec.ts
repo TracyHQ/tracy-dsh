@@ -1,9 +1,9 @@
 /** Messages file-reference admission, bounded recovery and request-wide inline fallback. */
 import type { AnonymousUserId } from '@deepseek-ai/dsh-anonymous-user-id'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
+import { AttachmentError, AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { createAssistantMessage, createToolResultMessage, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage, LlmError, resolveRetryPolicy, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { DeepSeekFileId } from '../src/file-id.ts'
 import { DeepSeekFileStore } from '../src/file-store.ts'
 import { resolveAdapterOptions } from '../src/config.ts'
@@ -205,6 +205,61 @@ describe('Messages Files requests', () => {
     controller.abort()
     await result
     expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['ATTACHMENT_NOT_FOUND', 'ATTACHMENT_CORRUPT'] as const)(
+    'sends a note in place of an earlier image whose stored copy fails with %s, and the turn proceeds',
+    async (code) => {
+      const fetchImpl = vi.fn<typeof fetch>(async () => success())
+      vi.stubGlobal('fetch', fetchImpl)
+      const h = harness()
+      h.readImageRequest.mockImplementation(async (attachment) => {
+        if (attachment.attachmentId === ref.attachmentId) throw new AttachmentError('Attachment object is missing.', code)
+        return version(attachment)
+      })
+      const named = { ...ref, name: 'open-page.jpg' }
+      const callId = ToolCallId('open-page')
+      const messages = [
+        user('open the page'),
+        createAssistantMessage({ source: { provider: 'deepseek-official', model }, content: [{ type: 'tool-call', id: callId, name: 'open_page', arguments: '{}' }] }),
+        createToolResultMessage({ callId, isError: false, content: [{ type: 'image', attachment: named }] }),
+        createAssistantMessage({ source: { provider: 'deepseek-official', model }, content: [{ type: 'text', text: 'done' }] }),
+        { ...user(), content: [{ type: 'text' as const, text: 'and now this one' }, { type: 'image' as const, attachment: second }] },
+      ]
+      await chunks(h.adapter.stream(options({ model, messages })))
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      const sent = body(fetchImpl.mock.calls[0]?.[1])
+      expect(sent).toContain('image unavailable')
+      expect(sent).toContain('open-page.jpg')
+      expect(sent.match(/"file_id"/gu)).toHaveLength(1)
+    },
+  )
+
+  it('fails the turn with a non-retryable ATTACHMENT_MISSING when an image of the current message cannot be read', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => success())
+    vi.stubGlobal('fetch', fetchImpl)
+    const h = harness()
+    h.readImageRequest.mockRejectedValue(new AttachmentError('Attachment object is missing.', 'ATTACHMENT_NOT_FOUND'))
+    const failure = await chunks(h.adapter.stream(request())).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(LlmError)
+    expect(failure).toMatchObject({ code: 'ATTACHMENT_MISSING', message: expect.stringMatching(/image .*missing/iu) as string })
+    expect(resolveRetryPolicy(undefined, 'retryPolicy')).toMatchObject({ mode: 'normal' })
+    expect(resolveRetryPolicy(undefined, 'retryPolicy')).not.toMatchObject({ retryableCodes: expect.arrayContaining(['ATTACHMENT_MISSING']) as unknown })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('never reports an attachment read failure as a transport failure', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => success())
+    vi.stubGlobal('fetch', fetchImpl)
+    const h = harness()
+    h.readImageRequest.mockRejectedValue(new AttachmentError('Unable to read image attachment.', 'ATTACHMENT_READ_FAILED'))
+    const messages = [
+      { ...user(), content: [{ type: 'image' as const, attachment: ref }] },
+      createAssistantMessage({ source: { provider: 'deepseek-official', model }, content: [{ type: 'text', text: 'seen' }] }),
+      user('next'),
+    ]
+    await expect(chunks(h.adapter.stream(options({ model, messages })))).rejects.toMatchObject({ code: 'ATTACHMENT_MISSING' })
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 
   it('classifies Files recovery only from provider error fields', () => {

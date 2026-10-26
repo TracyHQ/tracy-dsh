@@ -95,6 +95,14 @@
   --dsh-dockkit-strip-inline-start: 10px;
 }
 
+/* Tracy fork — integrated macOS chrome (ui-layout AppFrame.module.css): a
+   docked host paints its ground only below the strip there, which would let
+   the conversation header show through a fullscreen panel's strip row. A
+   fullscreen panel covers the whole frame, so it takes its full ground back. */
+:global(html[data-platform='darwin'][data-desktop-chrome='integrated']) .panel[data-sidebar-right-panel='fullscreen'] :global([data-dockkit-host='dock'][data-dockkit-column]) > :global([data-dockkit-pane]) {
+  background: var(--dsw-alias-bg-base);
+}
+
 /* Window fullscreen hides the traffic lights (html[data-fullscreen], desktop
    preload); the first pane's strip keeps only the ordinary inset. */
 :global([data-platform='darwin'][data-fullscreen]) .panel[data-sidebar-right-panel='fullscreen'] :global([data-dockkit-host='dock'][data-dockkit-column='0']) {
@@ -166,4 +174,12 @@
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+}
+.launcherEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
 }

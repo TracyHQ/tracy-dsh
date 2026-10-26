@@ -32,7 +32,7 @@ export type OpenTurnCloseCause = { readonly kind: 'interrupted' } | { readonly k
 const CLOSER_TEXT = {
   interrupted: {
     started: 'The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.',
-    notStarted: 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.',
+    notStarted: 'The tool call was interrupted before Tracy recorded it as started. Retry it if it is still needed.',
   },
   forked: {
     started: 'The history inherited by this branch records this tool call starting but does not include its result. The parent session may have completed it after the fork point. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.',

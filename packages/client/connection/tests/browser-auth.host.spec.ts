@@ -163,6 +163,23 @@ describe('BrowserAuth', () => {
     ))).toBe(true)
   })
 
+  it('mints and redirects under the mount prefix the caller names', async () => {
+    // The request URL arrives with the prefix already removed (the webserver did that), so the
+    // path check stays `/`; only what goes BACK to the browser carries the mount: the cookie is
+    // scoped to it, and the clean redirect lands on it rather than on the host's root.
+    const auth = await createAuth(new RecordCredentials())
+    const launch = new URL(auth.authenticatedUrl('http://127.0.0.1:3080'))
+    const minted = response()
+    expect(auth.authorizeIndex(request(`/${launch.search}`, '127.0.0.1:3080'), minted.value, '/site.example')).toBe(false)
+    expect(minted.state).toMatchObject({ status: 303, headers: { location: '/site.example/' } })
+    expect(minted.state.headers?.['set-cookie']).toMatch(/; Path=\/site\.example; /u)
+
+    const cookie = minted.state.headers!['set-cookie']!.split(';', 1)[0]!
+    const again = response()
+    expect(auth.authorizeIndex(request(`/${launch.search}`, '127.0.0.1:3080', { cookie }), again.value, '/site.example')).toBe(false)
+    expect(again.state).toMatchObject({ status: 303, headers: { location: '/site.example/' } })
+  })
+
   it('accepts the cookie for index serving and gives every unauthenticated request one response', async () => {
     const auth = await createAuth(new RecordCredentials())
     const { cookie } = exchange(auth)

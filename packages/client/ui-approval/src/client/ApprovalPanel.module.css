@@ -3,6 +3,10 @@
   flex-direction: column;
   align-items: center;
   padding: 8px calc(var(--dsh-composer-side-clearance) + 16px) 12px;
+  /* Size container of the narrow-seat rule below: the conversation column
+     beside a side panel is as narrow as 250px. Anonymous on purpose (CSS
+     modules hash container names per module). */
+  container-type: inline-size;
 }
 
 .card {
@@ -53,8 +57,11 @@
   word-break: break-all;
 }
 
+/* Wraps rather than clips: the card hides overflow, so an unwrapped row loses
+   Allow once off the right edge when the labels outgrow a narrow card. */
 .actionRow {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   padding: 14px 16px;
@@ -64,4 +71,15 @@
   background: var(--dsw-alias-interactive-bg-hover-danger);
   color: var(--dsw-alias-state-error-primary);
   border-color: transparent;
+}
+
+/* The narrowest seats give the card the 16px per side the root keeps for
+   lining it up with the input card, through negative margins: a container
+   query cannot restyle the container (.root) itself. */
+@container (max-width: 480px) {
+  .card {
+    width: calc(100% + 32px);
+    max-width: none;
+    margin-inline: -16px;
+  }
 }

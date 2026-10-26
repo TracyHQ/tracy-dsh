@@ -5,9 +5,9 @@
 import { defineStore, type EngineStoreHandle } from '@deepseek-ai/dsh-client-store'
 import type { MainPanelId } from './service.ts'
 import {
-  clampWidth, RIGHTBAR_DEFAULT_RATIO, RIGHTBAR_MAX_RATIO, RIGHTBAR_MIN,
-  SIDEBAR_AUTO_COLLAPSE, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN,
+  clampWidth, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN,
 } from './columns.ts'
+import { readChatWidth } from './chat-width.ts'
 
 /**
  * Transient layout preferences. Responsive concessions never rewrite widths;
@@ -27,10 +27,27 @@ type LayoutInfo = {
   viewportWidth: number
   narrowExpanded: boolean
   /**
-   * Saved right panel width in px, or null before its first opening. Resizing
-   * the frame and closing the panel preserve this preference.
+   * Conversation width in px while the right panel is open, or null for the
+   * default. Seeded from the width saved in this browser (chat-width.ts);
+   * resizing the frame and closing the panel preserve it. The right panel
+   * takes the rest of the frame. The frame clamps it to the current range on
+   * every read (columns.ts clampChat), because that range depends on the
+   * sidebar and the right panel's preferred width.
    */
-  rightbar: number | null
+  chat: number | null
+  /**
+   * The width in px the right panel's active tab prefers, or null for the
+   * frame default (columns.ts RIGHTBAR_PREFERRED). Reported by the occupant
+   * with its presentation; decides the default Conversation width while
+   * `chat` is null.
+   */
+  rightbarPreferred: number | null
+  /**
+   * Tracy: the widest the right panel may be, in px, while its active tab's
+   * type names a ceiling, or null for none. Reported by the occupant with its
+   * presentation; bounds the panel on every read and never rewrites `chat`.
+   */
+  rightbarMax: number | null
   /**
    * Whether the right panel is drawn at all, in either presentation.
    *
@@ -61,18 +78,23 @@ type LayoutActions = {
   setSidebar: (draft: LayoutState, px: number) => void
   toggleSidebar: (draft: LayoutState) => void
   setViewportWidth: (draft: LayoutState, width: number) => void
-  setRightbar: (draft: LayoutState, px: number) => void
-  openRightbar: (draft: LayoutState, track: boolean, fullscreen: boolean) => void
+  setChat: (draft: LayoutState, px: number) => void
+  resetChat: (draft: LayoutState) => void
+  openRightbar: (draft: LayoutState, track: boolean, fullscreen: boolean, preferred?: number | undefined, max?: number) => void
   closeRightbar: (draft: LayoutState) => void
 }
 
 /**
  * Create the layout panel store handle. For the sidebar the preference IS the
  * width, so closing it forgets its drag width — reopening restores the contract
- * default. The right panel initializes at 45% of the frame on first opening
- * and keeps that px preference across resizes and close. Drag writes clamp to
- * the current frame's range. Narrow sidebar toggles change only the expansion
- * override; opening the right panel clears that override.
+ * default. The Conversation width next to an open right panel starts from the
+ * width saved in this browser (or the contract default) and keeps its px
+ * preference across resizes and close; the right panel takes the rest. The
+ * frame clamps drag writes and every read to the current range; saving is the
+ * frame's business.
+ * Reading the saved width at creation is the store's only storage access.
+ * Narrow sidebar toggles change only the expansion override; opening the right
+ * panel clears that override.
  * @returns the store handle (spec + type + identity + factory in one).
  */
 export function createLayoutStore(): EngineStoreHandle<LayoutState, LayoutActions>  {
@@ -83,7 +105,9 @@ export function createLayoutStore(): EngineStoreHandle<LayoutState, LayoutAction
         sidebar: SIDEBAR_DEFAULT,
         viewportWidth: window.innerWidth,
         narrowExpanded: false,
-        rightbar: null,
+        chat: readChatWidth(),
+        rightbarPreferred: null,
+        rightbarMax: null,
         rightbarShown: false,
         rightbarTrack: false,
         rightbarFullscreen: false,
@@ -120,25 +144,32 @@ export function createLayoutStore(): EngineStoreHandle<LayoutState, LayoutAction
         }
         d.layoutInfo.viewportWidth = width
       },
-      setRightbar: (d, px: number) => {
+      setChat: (d, px: number) => {
         d.layoutInfo.rightbarInstant = false
-        d.layoutInfo.rightbar = clampWidth(px, RIGHTBAR_MIN, Math.max(RIGHTBAR_MIN, d.layoutInfo.viewportWidth * RIGHTBAR_MAX_RATIO))
+        d.layoutInfo.chat = Math.round(px)
       },
-      openRightbar: (d, track: boolean, fullscreen: boolean) => {
+      resetChat: (d) => {
+        d.layoutInfo.rightbarInstant = false
+        d.layoutInfo.chat = null
+      },
+      openRightbar: (d, track: boolean, fullscreen: boolean, preferred?: number | undefined, max?: number) => {
         if (!d.layoutInfo.rightbarShown || d.layoutInfo.rightbarTrack !== track || d.layoutInfo.rightbarFullscreen !== fullscreen) {
           d.layoutInfo.rightbarInstant = d.layoutInfo.rightbarFullscreen && !fullscreen
         }
         if (!d.layoutInfo.rightbarShown && d.layoutInfo.viewportWidth < SIDEBAR_AUTO_COLLAPSE) d.layoutInfo.narrowExpanded = false
-        d.layoutInfo.rightbar ??= Math.max(RIGHTBAR_MIN, Math.round(d.layoutInfo.viewportWidth * RIGHTBAR_DEFAULT_RATIO))
         d.layoutInfo.rightbarShown = true
         d.layoutInfo.rightbarTrack = track
         d.layoutInfo.rightbarFullscreen = fullscreen
+        d.layoutInfo.rightbarPreferred = preferred ?? null
+        d.layoutInfo.rightbarMax = max ?? null
       },
       closeRightbar: (d) => {
         if (d.layoutInfo.rightbarShown) d.layoutInfo.rightbarInstant = d.layoutInfo.rightbarFullscreen
         d.layoutInfo.rightbarShown = false
         d.layoutInfo.rightbarTrack = false
         d.layoutInfo.rightbarFullscreen = false
+        d.layoutInfo.rightbarPreferred = null
+        d.layoutInfo.rightbarMax = null
       },
     },
   })

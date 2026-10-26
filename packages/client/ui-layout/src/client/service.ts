@@ -47,8 +47,14 @@ export interface ILayout {
    *   including beneath a fullscreen overlay.
    * @param fullscreen - whether the panel covers the frame and hides its outer
    *   resize handle; independent of the underlying grid track.
+   * @param preferred - the width in px the panel's active tab prefers; omit
+   *   for the frame default. It sets the panel width only until the user drags
+   *   the divider.
+   * @param max - Tracy: the widest in px the panel may be while its active tab's
+   *   type names a ceiling; omit for none. It never replaces the width the user
+   *   dragged to, so the panel returns to that width once the ceiling is gone.
    */
-  openRightbar(track: boolean, fullscreen: boolean): void
+  openRightbar(track: boolean, fullscreen: boolean, preferred?: number | undefined, max?: number): void
   /** Report the right panel as hidden: no track, no handle. */
   closeRightbar(): void
 }
@@ -95,8 +101,9 @@ export class LayoutController implements ILayout {
   }
 
   /** Report the right panel's track and fullscreen presentation. */
-  openRightbar(track: boolean, fullscreen: boolean): void {
-    this.panels.openRightbar(track, fullscreen)
+  openRightbar(track: boolean, fullscreen: boolean, preferred?: number | undefined, max?: number): void {
+    if (max === undefined) this.panels.openRightbar(track, fullscreen, preferred)
+    else this.panels.openRightbar(track, fullscreen, preferred, max)
   }
 
   /** Report the right panel as hidden: no track, no handle. */

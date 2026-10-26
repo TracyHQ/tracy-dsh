@@ -20,6 +20,9 @@
     },
     {
       "path": "../fs"
+    },
+    {
+      "path": "../../../native/system/packages/entry"
     }
   ]
 }

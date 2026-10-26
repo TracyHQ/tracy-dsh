@@ -15,10 +15,16 @@ import type {
   IWorkspaces, WorkspaceId, WorkspaceSnapshot, WorkspaceView,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { followAddress, holdsAddress, sessionInAddress, writeAddress } from './url-state.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { RowToast } from './contract/slots.ts'
 import { pinOrderAccounts, pinOrderSource } from './pin-order.ts'
 import type { WorkspaceViewStoreActions } from './stores.ts'
+
+/** Re-read after async boundaries where TypeScript keeps the earlier branch narrowing. */
+function isAborted(signal: AbortSignal): boolean {
+  return signal.aborted
+}
 
 interface MainSelection {
   readonly sessionId?: SessionId
@@ -123,6 +129,12 @@ export class DirectoryBrowseError extends Error {
   }
 }
 
+/**
+ * Longest wait, in milliseconds, between a New Session's creation and its Workspace membership echo
+ * before the Session opens anyway.
+ */
+export const ATTACH_ECHO_WAIT_MS = 2000
+
 /** Implements Workspace archive and directory UI operations. */
 class UiWorkspaceService extends Service implements UiWorkspace {
   private readonly connecting = new Map<WorkspaceId, Promise<SessionId>>()
@@ -149,6 +161,13 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     private readonly notify: (toast: RowToast) => void,
   ) {
     super(ctx, 'uiWorkspace')
+    // Tracy: the address outranks the persisted cell — a pasted or bookmarked `<base>s/<id>` is a
+    // request for THAT session, whatever this browser last had open. Startup validates it against
+    // the live list exactly as it validates the persisted one.
+    const addressed = sessionInAddress()
+    if (addressed !== undefined && addressed !== this.selection.getSnapshot().sessionId) {
+      this.selection.set({ sessionId: addressed })
+    }
     ctx.effect(() => {
       const stop = this.watchNavigation()
       return () => {
@@ -212,7 +231,10 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       if (!navigation.aborted) this.notify({ kind: 'createFailed', message: creationFailureMessage(error) })
       throw error
     }
-    if (navigation.aborted) return
+    if (isAborted(navigation)) return
+    // Tracy: wait for the Workspace to account for the Session, so it never opens under Ungrouped.
+    await this.whenAccounted(workspaceId, sessionId)
+    if (isAborted(navigation)) return
     this.replaceMain(sessionId, navigation, 'reveal', beforeOpen)
   }
 
@@ -238,6 +260,31 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     void this.openWorkspace(target).catch(
       (reason: unknown) => { console.warn('new session failed:', reason) },
     )
+  }
+
+  /**
+   * Resolve when the Workspace list accounts for a Session, or after {@link ATTACH_ECHO_WAIT_MS}.
+   * `sessions.create` publishes the Session summary at once, while Workspace membership arrives on
+   * the Workspace follow stream; a blank Session opened before that echo renders under Ungrouped
+   * and then moves into its Workspace.
+   * @param workspaceId - Workspace the Session was created in.
+   * @param sessionId - Session to wait for.
+   * @returns a promise that settles once, never rejecting.
+   */
+  private whenAccounted(workspaceId: WorkspaceId, sessionId: SessionId): Promise<void> {
+    const accounted = (): boolean => this.workspaces.list.getSnapshot().items
+      .some(item => item.workspaceId === workspaceId && item.sessionIds.includes(sessionId))
+    if (accounted()) return Promise.resolve()
+    return new Promise((resolve) => {
+      let unsubscribe = (): void => undefined
+      const settle = (): void => {
+        clearTimeout(timer)
+        unsubscribe()
+        resolve()
+      }
+      const timer = setTimeout(settle, ATTACH_ECHO_WAIT_MS)
+      unsubscribe = this.workspaces.list.subscribe(() => { if (accounted()) settle() })
+    })
   }
 
   async archiveSession(sessionId: SessionId, options: { readonly stopActivity?: boolean } = {}): Promise<void> {
@@ -308,8 +355,47 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     const disposeWorkspaces = this.workspaces.list.subscribe(reconcile)
     const disposeSessions = this.sessions.list.subscribe(reconcile)
     reconcile()
+    // Tracy: the address bar mirrors the main selection once the list is real: a person changing
+    // session gets a history entry (Back returns to the previous one); the boot restore and a
+    // selection the list no longer has correct the address in place. Back and Forward select the
+    // session the address names, or none. A pending list writes nothing — nothing is chosen yet.
+    // "Synced" means a session has been on the bar once. Until then every write replaces: the
+    // boot restore, the gap while the list validates it (main briefly undefined), and the session
+    // this policy picks by itself on a browser that had nothing saved are all one arrival, not a
+    // change a person made — a history entry for any of them would send Back to the bare address
+    // instead of the previous session. `mainReference` is the validated selection: `replaceMain`
+    // and `clearMain` write `selection` in the same breath they set it, so that store is the wake.
+    let addressSynced = false
+    let addressWritten: SessionId | undefined
+    const mirrorAddress = (): void => {
+      if (this.lifetime.signal.aborted) return
+      if (this.sessions.list.getSnapshot().phase === 'pending') return
+      const current = this.mainReference?.sessionId
+      if (addressSynced && current === addressWritten) return
+      // Tracy: an early address naming a listed session is held, not corrected — `holdsAddress`.
+      if (holdsAddress({
+        current,
+        synced: addressSynced,
+        addressed: sessionInAddress(),
+        listed: id => this.sessions.list.getSnapshot().byId[id] !== undefined,
+      })) return
+      writeAddress(current, addressSynced ? 'push' : 'replace')
+      addressWritten = current
+      addressSynced = addressSynced || current !== undefined
+    }
+    const disposeAddressMirror = this.selection.subscribe(mirrorAddress)
+    const disposeAddressList = this.sessions.list.subscribe(mirrorAddress)
+    mirrorAddress()
+    const disposeAddressFollower = followAddress((id) => {
+      if (this.lifetime.signal.aborted) return
+      if (id === undefined) this.clearMain()
+      else if (this.sessions.list.getSnapshot().byId[id] !== undefined) this.openSession(id)
+    })
     return () => {
       this.lifetime.abort()
+      disposeAddressFollower()
+      disposeAddressList()
+      disposeAddressMirror()
       disposeSessions()
       disposeWorkspaces()
     }

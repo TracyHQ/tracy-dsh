@@ -6,7 +6,7 @@ The system package family supplies native mechanisms to Node callers: a Linux co
 
 The ESM package `@deepseek-ai/node-addon-system` and its optional platform packages share one version. Platform metadata chooses the operating system and CPU; each package's `prebuilds.json` declares the files it must contain.
 
-The `./landlock-run` entry owns Landlock path resolution, grant argv, and the functional probe. It does not load native addons. The `./flock` entry lazily loads `system.node` only when `tryLockExclusive(fd)` is called. Importing either JavaScript entry therefore works without a matching native payload. The package exposes these capability subpaths and its manifest, without a root export.
+The `./landlock-run` entry owns Landlock path resolution, grant argv, and the functional probe. It does not load native addons. The `./flock` entry lazily loads `system.node` only when `tryLockExclusive(fd)` is called, and the `./dirfd` entry only when one of its calls (or `dirfdSupported()`) runs. Importing any JavaScript entry therefore works without a matching native payload. The package exposes these capability subpaths and its manifest, without a root export.
 
 ## Separate mechanisms
 
@@ -15,6 +15,8 @@ The `./landlock-run` entry owns Landlock path resolution, grant argv, and the fu
 `system.node` uses stable Node-API v8. Its flock operation follows [fs-ext's asynchronous callback model](https://github.com/baudehlo/node-fs-ext/blob/v2.1.1/fs-ext.cc): it runs `flock(fd, LOCK_EX | LOCK_NB)` in asynchronous work and records errno on that worker. The native callback receives zero or positive errno; JavaScript owns the promise and syscall error construction. Setup errors throw into that promise. Callback exceptions are reported through Node's uncaught-exception handler; unexpected Node-API failures terminate the process. A terminating environment may suppress JavaScript completion, but its cleanup waits for queued or running native work before freeing storage.
 
 The descriptor belongs to the caller and must stay open through completion. The binding neither opens nor closes it; closing the final descriptor for its open file description releases the lock.
+
+The same addon carries `openat`, `mkdirat`, `renameat`, `linkat`, and `unlinkat` with the same asynchronous model; their callback receives `(errno, result)`. Names are single path components and directory descriptors are non-negative, both checked in C, so no call walks above the named entry or falls back to the working directory. `dsh-fs-local` uses them on Linux to publish atomic writes relative to a parent descriptor it verified through `/proc/self/fd`; see the [dirfd contract](dirfd-contract.md). `addon.c` owns module init and each capability source registers its own functions.
 
 The JSONL backend retains its inode check, materialization timing, and close lifecycle. Windows uses its existing koffi semaphore and never calls this POSIX binding. The browser worker supplies a single-process replacement for the flock entry, while running the Landlock JavaScript API unchanged.
 

@@ -30,6 +30,38 @@ export const inject = ['tools', 'userQuestions']
 
 const description = 'Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding.'
 
+/** The tool result as the model reads it: the answer JSON, plus what the human's choice of action asks of it. */
+interface AnswerView {
+  answers: { id: string; selected: string[]; custom?: string }[]
+  action?: string
+  note?: string
+}
+
+/**
+ * Render the answer for the model. A plain submit stays the bare JSON; a
+ * `follow_up` or `decide` adds one line saying what the human expects next, so
+ * the model does not have to infer it from the shape of the answers.
+ */
+function renderAnswer(asked: readonly { id: string }[], value: AnswerView): string {
+  const json = JSON.stringify(value)
+  if (value.action === 'follow_up') {
+    return `${json}\nThe customer asked for follow-up questions before deciding; `
+      + 'ask only what is new, do not repeat answered questions.'
+  }
+  if (value.action === 'decide') {
+    // A question counts as left to the model when its answer is empty or the
+    // answerer did not return it at all.
+    const answered = new Set(value.answers
+      .filter(answer => answer.selected.length > 0 || answer.custom !== undefined)
+      .map(answer => answer.id))
+    const left = asked.map(question => question.id).filter(id => !answered.has(id))
+    return left.length === 0
+      ? json
+      : `${json}\nThe customer left the unanswered questions to you: ${left.join(', ')}`
+  }
+  return json
+}
+
 export function apply(ctx: Context, config: Config = {}): void {
   if (config.mode === 'timed') {
     registerTimedAskUser(ctx, config.timeout)
@@ -69,6 +101,10 @@ export function apply(ctx: Context, config: Config = {}): void {
               type: 'boolean',
               description: 'Whether the user may select more than one option. Defaults to false.',
             },
+            recommended: {
+              type: 'string',
+              description: 'Label of the option you would pick yourself; it is shown as the default. It must equal one option\'s label exactly; do not add a suffix such as "(Recommended)" to labels.',
+            },
           },
         },
       },
@@ -91,9 +127,11 @@ export function apply(ctx: Context, config: Config = {}): void {
               },
             },
           },
+          action: { type: 'string', enum: ['submit', 'decide', 'follow_up'] },
+          note: { type: 'string' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      render: (args, value) => [{ type: 'text', text: renderAnswer(args.questions, value) }],
     },
     async execute(args, exec) {
       const result = await ctx.userQuestions.ask({
@@ -103,6 +141,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           ...question.header !== undefined ? { header: question.header } : {},
           ...question.options !== undefined ? { options: question.options } : {},
           ...question.multi_select !== undefined ? { multiSelect: question.multi_select } : {},
+          ...question.recommended !== undefined ? { recommended: question.recommended } : {},
         })),
         ...exec.agent !== undefined ? { agent: exec.agent } : {},
         signal: exec.signal,
@@ -113,6 +152,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           selected: [...answer.selected],
           ...answer.custom !== undefined ? { custom: answer.custom } : {},
         })),
+        ...result.action !== undefined ? { action: result.action } : {},
+        ...result.note !== undefined ? { note: result.note } : {},
       }
     },
   }))

@@ -91,6 +91,20 @@ async function boot(shortcuts: Partial<Shortcuts> = {}) {
   return { ctx, registered, dictionaries, layout, current, resources, fiber, seat, injectedOf }
 }
 
+/**
+ * Give the registry two doors, so an expansion has something to open onto and
+ * `defaultSeed` still picks the guide (a single door would be picked itself).
+ * Without any, the store refuses the expansion — that rule has its own spec.
+ */
+function doors(ctx: Context): void {
+  for (const kind of ['door-a', 'door-b']) {
+    ctx.sidebarRightTabs.register({
+      id: `spec/${kind}`, kind, patterns: [`sidebar://${kind}`], title: () => kind,
+      guide: [{ id: 'open', order: 10, title: () => kind }],
+    })
+  }
+}
+
 describe('ui-sidebar-right apply', () => {
   it('keeps the host Loader entry inert', () => {
     expect(hostApply).not.toThrow()
@@ -165,11 +179,11 @@ describe('ui-sidebar-right apply', () => {
     const injected = injectedOf(seat('rightbar.session')) as SidebarRightInjected
     // The frame learns the composition of expanded and presentation, nothing else.
     injected.syncPresentation({ shown: true, track: true, fullscreen: false })
-    expect(layout.openRightbar).toHaveBeenLastCalledWith(true, false)
+    expect(layout.openRightbar).toHaveBeenLastCalledWith(true, false, undefined)
     injected.syncPresentation({ shown: true, track: true, fullscreen: true })
-    expect(layout.openRightbar).toHaveBeenLastCalledWith(true, true)
+    expect(layout.openRightbar).toHaveBeenLastCalledWith(true, true, undefined)
     injected.syncPresentation({ shown: true, track: false, fullscreen: true })
-    expect(layout.openRightbar).toHaveBeenLastCalledWith(false, true)
+    expect(layout.openRightbar).toHaveBeenLastCalledWith(false, true, undefined)
     injected.syncPresentation({ shown: false, track: false, fullscreen: false })
     expect(layout.closeRightbar).toHaveBeenCalledOnce()
     // The registry, observable: what the seat dispatches a kind to.
@@ -189,6 +203,7 @@ describe('ui-sidebar-right apply', () => {
     onTestFinished(() => { vi.unstubAllGlobals() })
     injected.toggleFullscreen()
     expect(injectedOf(seat('conversation.session.header.corner'))).toHaveProperty('hooks.shortcuts')
+    doors(ctx)
     current.set({ key: SESSION })
     injected.openTab('guide', { revealIfOpened: false })
     const surface = instance.getSnapshot().bySession[SESSION]
@@ -226,6 +241,7 @@ describe('ui-sidebar-right apply', () => {
     const instance = handle.create(SESSION)
     instance.actions.open(SESSION)
     // The first expansion seeds the guide; a second tab beside it makes it closable.
+    doors(ctx)
     instance.actions.setExpanded(SESSION, true)
     instance.actions.openContent(SESSION, { kind: 'text', contentId: 'dsh-resource://file/session/s/a.txt', title: 'a' }, () => {})
     const guide = Object.values(instance.getSnapshot().bySession[SESSION]?.layout.tabs ?? {}).find(tab => tab.kind === 'guide')
@@ -307,6 +323,7 @@ describe('ui-sidebar-right apply', () => {
     const handle = seat('rightbar.session').store as ReturnType<typeof createSidebarRightStore>
     // Minted under the session key, so the instance is adopted and the teardown releases it.
     const instance = handle.create(SESSION)
+    doors(ctx)
     current.set({ key: SESSION })
     injected.openTab('guide')
     const surface = instance.getSnapshot().bySession[SESSION]

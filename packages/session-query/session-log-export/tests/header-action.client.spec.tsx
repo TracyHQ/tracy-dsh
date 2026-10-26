@@ -52,6 +52,15 @@ describe('Session export Header action', () => {
     expect(b.view.queryByRole('menu')).toBeNull()
   })
 
+  it('marks the menu trigger and each item so a host can hide the menu or one item (Tracy)', () => {
+    const b = bench(true)
+    const trigger = b.view.getByRole('button', { name: 'More actions' })
+    expect(trigger.hasAttribute('data-session-menu')).toBe(true)
+    fireEvent.click(trigger)
+    expect(b.view.getByRole('menuitem', { name: 'Download session log' }).getAttribute('data-menu-item')).toBe('download')
+    expect(b.view.getByRole('menuitem', { name: 'Feedback' }).getAttribute('data-menu-item')).toBe('feedback')
+  })
+
   it('keeps export available without the feedback plugin', () => {
     const b = bench()
     fireEvent.click(b.view.getByRole('button', { name: 'More actions' }))

@@ -41,19 +41,17 @@ Surrounding whitespace is trimmed, but the remark is otherwise kept exactly as t
 <a id="the-web-feedback-dialog"></a>
 ### The Web feedback dialog
 
-In the Web client a bare `/feedback` — picked from the composer menu or typed and sent without text — opens the feedback dialog instead of the usage error. The dialog offers the seven categories below and a free-text box; every field is optional and an empty submission is accepted, and the conversation log travels with the recorded event as with every feedback event. It records through `sessionFeedback.record`, which appends the same `feedback/record` event without command bookkeeping and without an acknowledgement row; the dialog shows a toast instead.
+In the Web client a bare `/feedback` — picked from the composer menu or typed and sent without text — opens the feedback dialog instead of the usage error. The dialog offers five multi-select categories and a free-text box; every field is optional and an empty submission is accepted, and the conversation log travels with the recorded event as with every feedback event. It records through `sessionFeedback.record`, which appends the same `feedback/record` event without command bookkeeping and without an acknowledgement row; the dialog shows a toast instead.
 
 | Category id | Meaning |
 |---|---|
-| `task-result` | The outcome of the task |
-| `instruction-following` | Understanding and following instructions |
-| `product-interaction` | Product features and interaction |
-| `service-stability` | Stability and speed |
-| `resource-cost` | Resource usage and cost |
-| `security-privacy-permission` | Security, privacy, and permissions |
+| `general` | General feedback |
+| `product-feature` | Product feature |
+| `desktop-app` | Desktop app |
+| `web-app` | Web app |
 | `other` | Anything else |
 
-The ids are durable log vocabulary shared with per-message feedback; each surface owns its localized labels.
+The new ids are durable log vocabulary shared with per-message feedback. Legacy single-category ids remain readable from existing session logs; each surface owns its localized labels.
 
 ### Recording feedback from your own UI
 

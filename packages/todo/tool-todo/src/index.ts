@@ -10,7 +10,12 @@ import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
 import type { ZodType } from 'zod'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { TodoItem } from './types.ts'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed, MessageSource } from '@deepseek-ai/dsh-llm'
+import type { Session } from '@deepseek-ai/dsh-session'
+import type { TodoItem, TodoPlanState } from './types.ts'
+// Type-only: resolves the `agent/turn-stopping` event declaration.
+import type {} from '@deepseek-ai/dsh-agent'
 // Type-only: resolves the required ctx.sessionProjections service declaration.
 import type {} from '@deepseek-ai/dsh-session-projection'
 // The `todos` projection-key declaration lives in src/types.ts (its one home);
@@ -18,6 +23,13 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 // module edge in the emitted index.d.ts, so aggregate programs consuming the
 // declarations still receive the SessionProjectionMap merge.
 export type * from './types.ts'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Tracy fork: the reminder steering the agent back to its unfinished plan. */
+    'tool-todo': { kind: 'tool-todo' } & ContextFormed
+  }
+}
 
 export const name = 'tool-todo'
 export const inject = ['tools', 'sessionProjections']
@@ -99,14 +111,72 @@ function toTodoList(raw: { content: string; status: string }[], allowParallel: b
   return todos
 }
 
+const todoItemSchema = zod.object({
+  content: zod.string(),
+  status: zod.union([zod.literal('pending'), zod.literal('in_progress'), zod.literal('completed')]),
+})
+
 /** Wire payload schema of the `todos` projection (whole list or pre-first-write null). */
-const todosProjectionSchema: ZodType<TodoItem[] | null> = zod.union([
-  zod.array(zod.object({
-    content: zod.string(),
-    status: zod.union([zod.literal('pending'), zod.literal('in_progress'), zod.literal('completed')]),
-  })),
+const todosProjectionSchema: ZodType<TodoItem[] | null> = zod.union([zod.array(todoItemSchema), zod.null()])
+
+/** Fold state schema of the `todos` projection: the list plus who wrote it. */
+const todoPlanStateSchema: ZodType<TodoPlanState | null> = zod.union([
+  zod.object({ todos: zod.array(todoItemSchema), byAgent: zod.boolean() }),
   zod.null(),
 ])
+
+/** Whether a standing plan still has work in progress — the one a new turn must not blank. */
+function inFlight(state: TodoPlanState | null): boolean {
+  return state !== null && state.todos.some(item => item.status === 'in_progress')
+}
+
+/**
+ * Tracy fork: the agent's own plan once its turn has ended. Nothing works on an agent's todo
+ * between its turns, so an `in_progress` item left behind is shown as not started rather than
+ * running; a host-written list is left alone because the host keeps working outside any turn.
+ * @param state - the fold state at `turn/end`.
+ * @returns the same reference when nothing changes.
+ */
+function settle(state: TodoPlanState | null): TodoPlanState | null {
+  if (state === null || !state.byAgent || !inFlight(state)) return state
+  return {
+    byAgent: true,
+    todos: state.todos.map(item => item.status === 'in_progress' ? { ...item, status: 'pending' } : item),
+  }
+}
+
+/**
+ * Where the steer message comes from — a one-line notice, kept apart from the person's own words.
+ * @param todos - the unfinished plan.
+ * @returns the reminder's source.
+ */
+function reminderSource(todos: readonly TodoItem[]): MessageSource {
+  const left = todos.filter(item => item.status !== 'completed').length
+  return { kind: 'tool-todo', form: 'notice', summary: `todo list: ${left} unfinished` }
+}
+
+/**
+ * The steer sent when the agent tries to close a turn with its own plan unfinished. A question the
+ * person sends mid-turn is spliced into the running turn; models answer it and stop, leaving the
+ * plan behind with nothing saying so (measured on a customer session, 30/09/2026).
+ * @param todos - the unfinished plan.
+ * @returns the model-facing reminder.
+ */
+function reminder(todos: readonly TodoItem[]): string {
+  const lines = todos.map(item => `- [${item.status}] ${item.content}`).join('\n')
+  return 'Your todo list still has unfinished items:\n'
+    + `${lines}\n`
+    + 'If you answered something else in between, go back to the list now and continue with the next item, '
+    + 'marking each item completed with todo_write as soon as it is done — including items you already finished. '
+    + 'If the person changed their mind, or you cannot go on without them, update the list with todo_write '
+    + 'so it shows what is true, and tell them what is left.'
+}
+
+/** The agent's current plan in one session, and whether this plan was already steered back to. */
+interface OpenPlan {
+  todos: TodoItem[]
+  steered: boolean
+}
 
 /**
  * Register the `todo_write` tool on `ctx.tools` and the `todos` unit on
@@ -116,22 +186,49 @@ const todosProjectionSchema: ZodType<TodoItem[] | null> = zod.union([
  */
 export function apply(ctx: Context, config: Config): void {
   const allowParallel = config.allowParallelInProgress
-  // Standing-plan fold: latest whole todo/write list, cleared by the next
-  // turn/start (turn/end keeps the finished checklist visible); null before the
-  // first write or after a later turn begins; every other event returns the
-  // same state reference.
-  ctx.sessionProjections.register<'todos', TodoItem[] | null>({
+  // Standing-plan fold: latest whole todo/write list. The next turn/start
+  // clears a SETTLED plan (turn/end keeps the finished checklist visible) but
+  // keeps one still in flight — any item in_progress — so a message sent while
+  // a long-running job reports through this list does not blank it (Tracy
+  // fork: a host-driven build writes its stages here, and the customer may
+  // keep talking meanwhile). The agent's own plan is settled at turn/end, so
+  // an abandoned item stops spinning. null before the first write; every
+  // other event returns the same state reference.
+  ctx.sessionProjections.register<'todos', TodoPlanState | null>({
     key: 'todos',
-    stateSchema: todosProjectionSchema,
+    stateSchema: todoPlanStateSchema,
     init: () => null,
     apply: (state, event) => {
-      if (event.type === 'todo/write') return event.data.todos
-      if (event.type === 'turn/start') return null
+      if (event.type === 'todo/write') return { todos: event.data.todos, byAgent: event.data.by === 'agent' }
+      if (event.type === 'turn/end') return settle(state)
+      if (event.type === 'turn/start') return inFlight(state) ? state : null
       return state
     },
-    wire: { viewSchema: todosProjectionSchema, view: state => state },
-    stateVersion: 2,
+    wire: { viewSchema: todosProjectionSchema, view: state => state?.todos ?? null },
+    stateVersion: 4,
   })
+
+  // Tracy fork: steer the agent back to its own unfinished plan before the
+  // turn closes — once per unchanged plan, so a model that stops again (it is
+  // waiting for the person, or chose to) still ends the turn. A plan outlives
+  // no turn: once the turn ends it is not raised again.
+  const plans = new WeakMap<Session, OpenPlan>()
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'todo/write') {
+      if (event.data.by === 'agent') plans.set(session, { todos: event.data.todos, steered: false })
+      else plans.delete(session)
+    } else if (event.type === 'turn/end') {
+      plans.delete(session)
+    }
+  })
+  ctx.on('agent/turn-stopping', ({ agent }) => {
+    const plan = plans.get(agent.session)
+    if (plan === undefined || plan.steered) return
+    if (plan.todos.every(item => item.status === 'completed')) return
+    plan.steered = true
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: reminder(plan.todos) }], source: reminderSource(plan.todos) }))
+  })
+
   ctx.tools.register(defineTool({
     name: 'todo_write',
     description: describe(allowParallel),
@@ -196,7 +293,7 @@ export function apply(ctx: Context, config: Config): void {
         // session) has nowhere to write it. Reject rather than silently no-op.
         throw new Error('todo_write requires an owning agent session')
       }
-      exec.agent.session.append('todo/write', { todos })
+      exec.agent.session.append('todo/write', { todos, by: 'agent' })
       const count = (status: TodoItem['status']): number => todos.filter(t => t.status === status).length
       return Promise.resolve({
         todos: todos.map(todo => ({ content: todo.content, status: todo.status })),

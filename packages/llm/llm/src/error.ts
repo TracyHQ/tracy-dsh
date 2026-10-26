@@ -173,3 +173,10 @@ export function isHarnessError(value: unknown): value is HarnessError {
  * the agent or summarizer retries with freshly derived input.
  */
 export const IMAGE_OFFLOAD_REQUIRED_CODE = 'IMAGE_OFFLOAD_REQUIRED'
+
+/**
+ * Canonical code for a request holding an image whose stored copy cannot be
+ * read. It is not in the default retryable set: the stored copy will not come
+ * back by asking again.
+ */
+export const ATTACHMENT_MISSING_CODE = 'ATTACHMENT_MISSING'

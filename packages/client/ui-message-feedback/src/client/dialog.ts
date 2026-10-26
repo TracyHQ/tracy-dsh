@@ -21,7 +21,7 @@ export type FeedbackDialogTarget =
 export interface FeedbackDialogState {
   /** Target the dialog is open for; null while closed. */
   readonly target: FeedbackDialogTarget | null
-  readonly category: FeedbackCategory | null
+  readonly categories: readonly FeedbackCategory[]
   readonly text: string
   /** A submission is in flight; the form ignores edits and submits until it settles. */
   readonly submitting: boolean
@@ -34,12 +34,12 @@ export interface FeedbackDialogState {
 /**
  * Record one submission against its target.
  * @param target - the open target.
- * @param entry - the trimmed text and the category, each present only when given.
+ * @param entry - trimmed text and selected categories, present only when given.
  */
 export type FeedbackSubmit = (target: FeedbackDialogTarget, entry: FeedbackRecord) => Promise<MessageFeedbackActionResult>
 
 const CLOSED: Omit<FeedbackDialogState, 'toast'> = {
-  target: null, category: null, text: '', submitting: false, failure: null,
+  target: null, categories: [], text: '', submitting: false, failure: null,
 }
 
 /** Per-session dialog controller; one instance backs the overlay entry and every message control. */
@@ -72,9 +72,9 @@ export class FeedbackDialogController {
 
   /**
    * Replace part of the draft while it is editable.
-   * @param draft - the category (null clears it) or the text as typed.
+   * @param draft - selected categories or the text as typed.
    */
-  edit(draft: Partial<Pick<FeedbackDialogState, 'category' | 'text'>>): void {
+  edit(draft: Partial<Pick<FeedbackDialogState, 'categories' | 'text'>>): void {
     const s = this.state.getSnapshot()
     if (s.target === null || s.submitting) return
     this.state.set({ ...s, ...draft })
@@ -94,7 +94,7 @@ export class FeedbackDialogController {
     const text = s.text.trim()
     const result = await this.submit(s.target, {
       ...(text.length === 0 ? {} : { text }),
-      ...(s.category === null ? {} : { category: s.category }),
+      ...(s.categories.length === 0 ? {} : { categories: [...s.categories] }),
     })
     if (result.ok) {
       // The remark is recorded whichever draft is on screen now, so the toast

@@ -361,7 +361,7 @@ describe('candidates', () => {
     const SHIPPED: CommandDescriptor[] = [
       { definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-compact'), name: 'compact', description: 'Compact older conversation history' },
       { definitionId: CommandDefinitionId('@deepseek-ai/dsh-session-log-export'), name: 'export', description: 'Download this Session log as a ZIP archive' },
-      { definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-feedback'), name: 'feedback', description: 'Record feedback about this session', input: { hint: '<text>' } },
+      { definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-feedback'), name: 'feedback', description: 'Help us to improve Tracy', input: { hint: '<text>' } },
       { definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-goal'), name: 'goal', description: 'Set or view the goal for a long-running task', input: { hint: '<objective>', attachments: true } },
       { definitionId: CommandDefinitionId('@deepseek-ai/dsh-permission-presets'), name: 'permission', description: 'Switch the permission preset (sandbox mode + approval policy)', input: { hint: '<preset>' } },
       { definitionId: CommandDefinitionId('@deepseek-ai/dsh-plan-mode'), name: 'plan', description: 'Enter or leave plan mode', input: { hint: '[off|message]', attachments: true } },
@@ -464,7 +464,7 @@ describe('candidates', () => {
       await warm(proj('s1'))
       expect(menuPick(source, 'file', proj('s1'))).toBe('handled')
       expect(consumes).toEqual([{ guard: { kind: 'span', span: { start: 0, end: 5, draftRev: 3 } } }])
-      expect(run).toHaveBeenCalledExactlyOnceWith(proj('s1'))
+      expect(run).toHaveBeenCalledExactlyOnceWith(proj('s1'), '')
       expect(await source.matchEnter!(proj('s1'), '/file', new AbortController().signal, { attachments: 2 })).toBe('handled')
       expect(consumes[1]).toEqual({ guard: { kind: 'bare-token', token: '/file' } })
       expect(run).toHaveBeenCalledTimes(2)
@@ -623,7 +623,7 @@ describe('dispatch (menu column)', () => {
     await warm(proj('s1'))
     expect(menuPick(source, 'plan', proj('s1'), 5)).toBe('handled')
     expect(consumes).toEqual([{ guard: { kind: 'span', span: { start: 0, end: 5, draftRev: 3 } } }])
-    expect(run).toHaveBeenCalledWith(proj('s1'))
+    expect(run).toHaveBeenCalledWith(proj('s1'), '')
     expect(executeCalls).toEqual([])
     expect(command.popupFor(scope.ctx).state.getSnapshot().open).toBe(false)
   })
@@ -779,6 +779,202 @@ describe('matchEnter (enter column)', () => {
     await expect(source.matchEnter!(proj('s1'), '/nope', signal(), { attachments: 0 })).resolves.toBeUndefined()
     await expect(source.matchEnter!(proj('s1'), '/', signal(), { attachments: 0 })).resolves.toBeUndefined()
     await expect(source.matchEnter!(proj('s1'), 'plain text', signal(), { attachments: 0 })).resolves.toBeUndefined()
+  })
+})
+
+describe('text-taking actions (takesText, caseInsensitive)', () => {
+  const signal = () => new AbortController().signal
+  const helpContribution = (over: Partial<CommandContribution> & { run?: ReturnType<typeof vi.fn> } = {}): CommandContribution => {
+    const { run = vi.fn(), ...rest } = over
+    return {
+      name: 'x',
+      available: () => true,
+      ui: { kind: 'action', takesText: true, run: run as (session: ClientSessionContext, text?: string) => void },
+      ...rest,
+    }
+  }
+  /** Session scope whose consume-token listener records each request. */
+  const recording = (mint: (key: string) => { ctx: Context }) => {
+    const consumes: ConsumeTokenRequest[] = []
+    mint('s1').ctx.on('slash/input-consume-token', (r) => { consumes.push(r); return true })
+    return consumes
+  }
+
+  it('an argued line is consumed whole: run gets the trimmed text, the line guard clears the draft, nothing executes', async () => {
+    const run = vi.fn()
+    const { command, source, mint, executeCalls, listCalls } = await bench()
+    command.register(helpContribution({ run }))
+    const consumes = recording(mint)
+    await expect(source.matchEnter!(proj('s1'), '  /x   hello  there ', signal(), { attachments: 0 })).resolves.toBe('handled')
+    expect(consumes).toEqual([{ guard: { kind: 'line', line: '/x   hello  there' } }])
+    expect(run).toHaveBeenCalledExactlyOnceWith(proj('s1'), 'hello  there')
+    expect(executeCalls).toEqual([])
+    expect(listCalls).toEqual([]) // claimed ahead of the host catalog
+  })
+
+  it('bare enter runs it with an empty text', async () => {
+    const run = vi.fn()
+    const { command, source, mint, warm } = await bench()
+    command.register(helpContribution({ run }))
+    const consumes = recording(mint)
+    await warm(proj('s1'))
+    await expect(source.matchEnter!(proj('s1'), '/x', signal(), { attachments: 0 })).resolves.toBe('handled')
+    expect(consumes[0]).toEqual({ guard: { kind: 'bare-token', token: '/x' } })
+    expect(run).toHaveBeenLastCalledWith(proj('s1'), '')
+  })
+
+  // Tracy (help claim): a pick from the menu puts the token in the draft and runs nothing yet.
+  it('a menu pick claims "/x " with the action\'s hint and runs nothing until the claim submits', async () => {
+    const run = vi.fn()
+    const { command, source, mint, warm, executeCalls } = await bench()
+    command.register(helpContribution({ run, ui: { kind: 'action', takesText: true, hint: () => 'your question', run } }))
+    const consumes = recording(mint)
+    await warm(proj('s1'))
+    const outcome = menuPick(source, 'x', proj('s1'))
+    if (outcome === undefined || outcome === 'handled' || !('claim' in outcome)) throw new Error('expected claim')
+    expect(outcome.claim).toMatchObject({ name: 'x', token: '/x ', hint: 'your question' })
+    expect(outcome.claim.attachments).toBeUndefined()
+    expect(run).not.toHaveBeenCalled()
+    expect(consumes).toEqual([])
+    const actx = mint('s1').ctx
+    await expect(outcome.claim.submit('  how do I undo?  ', actx, [])).resolves.toEqual({ kind: 'success' })
+    expect(run).toHaveBeenLastCalledWith(proj('s1'), 'how do I undo?')
+    // Nothing typed after the token is the bare invocation.
+    await expect(outcome.claim.submit('', actx, [])).resolves.toEqual({ kind: 'success' })
+    expect(run).toHaveBeenLastCalledWith(proj('s1'), '')
+    expect(run).toHaveBeenCalledTimes(2)
+    expect(executeCalls).toEqual([])
+  })
+
+  it('a claim carries no hint when the action declares none or an empty one', async () => {
+    const { command, source, warm } = await bench()
+    command.register(helpContribution())
+    command.register(helpContribution({ name: 'y', ui: { kind: 'action', takesText: true, hint: () => '', run: vi.fn() } }))
+    await warm(proj('s1'))
+    for (const name of ['x', 'y']) {
+      const outcome = menuPick(source, name, proj('s1'))
+      if (outcome === undefined || outcome === 'handled' || !('claim' in outcome)) throw new Error('expected claim')
+      expect('hint' in outcome.claim).toBe(false)
+    }
+  })
+
+  it('a plain action (no takesText) still runs at once on a menu pick', async () => {
+    const run = vi.fn()
+    const { command, source, mint, warm } = await bench()
+    command.register({ name: 'x', available: () => true, ui: { kind: 'action', run } })
+    const consumes = recording(mint)
+    await warm(proj('s1'))
+    expect(menuPick(source, 'x', proj('s1'))).toBe('handled')
+    expect(consumes).toEqual([{ guard: { kind: 'span', span: { start: 0, end: 2, draftRev: 3 } } }])
+    expect(run).toHaveBeenCalledExactlyOnceWith(proj('s1'), '')
+  })
+
+  it('space after the name claims the typed spelling; an unavailable one stays plain text', async () => {
+    const run = vi.fn()
+    const { command, source, warm } = await bench()
+    command.register(helpContribution({ run }))
+    command.register(helpContribution({ name: 'off', available: () => false }))
+    await warm(proj('s1'))
+    const outcome = source.matchSpace!(proj('s1'), '/x')
+    if (outcome === undefined || outcome === 'handled' || !('claim' in outcome)) throw new Error('expected claim')
+    expect(outcome.claim.token).toBe('/x ')
+    expect(source.matchSpace!(proj('s1'), '/off')).toBeUndefined()
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('an action without takesText does not claim an argued line', async () => {
+    const run = vi.fn()
+    const { command, source, mint } = await bench()
+    command.register({ name: 'x', available: () => true, ui: { kind: 'action', run } })
+    const consumes = recording(mint)
+    await expect(source.matchEnter!(proj('s1'), '/x hello', signal(), { attachments: 0 })).resolves.toBeUndefined()
+    expect(run).not.toHaveBeenCalled()
+    expect(consumes).toEqual([])
+  })
+
+  it('an unavailable contribution does not claim; a popup contribution never claims an argued line', async () => {
+    const run = vi.fn()
+    const { command, source, mint, warm } = await bench()
+    command.register(helpContribution({ run, available: () => false }))
+    command.register(themeContribution())
+    const consumes = recording(mint)
+    await warm(proj('s1'))
+    await expect(source.matchEnter!(proj('s1'), '/x hello', signal(), { attachments: 0 })).resolves.toBeUndefined()
+    await expect(source.matchEnter!(proj('s1'), '/theme dark', signal(), { attachments: 0 })).resolves.toBeUndefined()
+    expect(run).not.toHaveBeenCalled()
+    expect(consumes).toEqual([])
+  })
+
+  it('an argued line carrying attachments is refused with the notice text; nothing runs or clears', async () => {
+    const run = vi.fn()
+    const { command, source, mint } = await bench()
+    command.register(helpContribution({ run }))
+    const consumes = recording(mint)
+    await expect(source.matchEnter!(proj('s1'), '/x hello', signal(), { attachments: 1 }))
+      .rejects.toThrow('command:notice.attachmentsUnsupported{"command":"x"}')
+    expect(run).not.toHaveBeenCalled()
+    expect(consumes).toEqual([])
+  })
+
+  it('a draft that changed before the consume request is left alone by the line guard, yet the action still runs', async () => {
+    const run = vi.fn()
+    const { command, source, mint } = await bench()
+    command.register(helpContribution({ run }))
+    const scope = mint('s1')
+    let draft = '/x hello'
+    const cleared: string[] = []
+    // The input shell's guard, verbatim: clear only while the trimmed draft still equals the line.
+    scope.ctx.on('slash/input-consume-token', (r) => {
+      if (r.guard.kind !== 'line' || draft.trim() !== r.guard.line) return undefined
+      cleared.push(draft)
+      draft = ''
+      return true
+    })
+    draft = '/x hello and more'
+    await expect(source.matchEnter!(proj('s1'), '/x hello', signal(), { attachments: 0 })).resolves.toBe('handled')
+    expect(cleared).toEqual([])
+    expect(draft).toBe('/x hello and more')
+    expect(run).toHaveBeenCalledExactlyOnceWith(proj('s1'), 'hello')
+  })
+
+  describe('caseInsensitive', () => {
+    it('folds the typed name and passes the text through untouched', async () => {
+      const run = vi.fn()
+      const { command, source, mint } = await bench()
+      command.register(helpContribution({ run, caseInsensitive: true }))
+      const consumes = recording(mint)
+      await expect(source.matchEnter!(proj('s1'), '/X Hello', signal(), { attachments: 0 })).resolves.toBe('handled')
+      expect(run).toHaveBeenLastCalledWith(proj('s1'), 'Hello')
+      expect(consumes[0]).toEqual({ guard: { kind: 'line', line: '/X Hello' } })
+      await expect(source.matchEnter!(proj('s1'), '/X', signal(), { attachments: 0 })).resolves.toBe('handled')
+      expect(run).toHaveBeenLastCalledWith(proj('s1'), '')
+      expect(consumes[1]).toEqual({ guard: { kind: 'bare-token', token: '/X' } })
+    })
+
+    it('a contribution that did not opt in does not match another casing', async () => {
+      const run = vi.fn()
+      const { command, source, warm } = await bench()
+      command.register(helpContribution({ run }))
+      await warm(proj('s1'))
+      await expect(source.matchEnter!(proj('s1'), '/X Hello', signal(), { attachments: 0 })).resolves.toBeUndefined()
+      await expect(source.matchEnter!(proj('s1'), '/X', signal(), { attachments: 0 })).resolves.toBeUndefined()
+      expect(run).not.toHaveBeenCalled()
+    })
+
+    it('space on the folded name claims the spelling as typed', async () => {
+      const { command, source, warm } = await bench()
+      command.register(helpContribution({ caseInsensitive: true }))
+      await warm(proj('s1'))
+      const outcome = source.matchSpace!(proj('s1'), '/X')
+      if (outcome === undefined || outcome === 'handled' || !('claim' in outcome)) throw new Error('expected claim')
+      expect(outcome.claim).toMatchObject({ name: 'x', token: '/X ' })
+    })
+
+    it('registration rejects a caseInsensitive name that is not lower case', async () => {
+      const { command } = await bench()
+      expect(() => command.register(helpContribution({ name: 'X', caseInsensitive: true }))).toThrow('lower case')
+      command.register(helpContribution({ name: 'X' }))() // exact-case registration stays allowed
+    })
   })
 })
 

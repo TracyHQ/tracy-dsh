@@ -27,6 +27,9 @@ import {
 import type { LanguageRowInjected } from './LanguageRow.tsx'
 import { LanguageRow } from './LanguageRow.tsx'
 import { createLanguageRowStore } from './settings-store.ts'
+import {
+  clearLocalLocalePreference, readLocalLocalePreference, writeLocalLocalePreference,
+} from '../local-preference.ts'
 
 export type { LanguageRowComponentProps, LanguageRowInjected } from './LanguageRow.tsx'
 export type { LanguageOptionRow, LanguageRowState } from './settings-store.ts'
@@ -74,6 +77,13 @@ export interface LocaleDefinition {
 export interface LocaleSnapshot {
   /** Active locale id. */
   active: LocaleId
+  /**
+   * The explicit selection, including one still waiting for its language to
+   * register; absent when the active locale follows the browser's language
+   * list (nothing chosen, or the choice was cleared through
+   * {@link LocaleRuntime.clearPreference}).
+   */
+  preference?: LocaleId
   /** Selectable locales in display order. */
   locales: readonly LocaleDefinition[]
   /** Monotonic change counter (registry or active changes). */
@@ -124,6 +134,9 @@ const BUILT_IN_LOCALES: readonly LocaleDefinition[] = Object.freeze(
 )
 
 /** Case-insensitive key for BCP 47-style ids. */
+/** Traditional-script Chinese: region or script says so (same rule as TCH tracy-web `matchLanguage`). */
+const TRADITIONAL_CHINESE = /^zh-(?:.*-)?(?:tw|hk|mo|hant)(?:-|$)/
+
 function localeKey(value: string): string {
   return value.toLowerCase()
 }
@@ -157,7 +170,7 @@ function syncDocumentLanguage(snapshot: LocaleSnapshot): void {
  * language's declared fallback chain in the entry namespace, then repeats it
  * in the shared common namespace before showing the key itself. Reads go
  * through {@link getLocale}; preferences change only through
- * {@link setLocale}, while language packs extend the catalog through
+ * {@link setLocale} and {@link clearPreference}, while language packs extend the catalog through
  * {@link addLanguage}. Continuous sync uses the `locale/change` event or
  * the LocaleFace getSnapshot/subscribe pair installed through
  * `ctx.slots.installLocale`.
@@ -175,6 +188,8 @@ export class LocaleRuntime {
   private provisional: LocaleId
   /** Last explicit selection, including one awaiting an external registration. */
   private preference: LocaleId | undefined
+  /** Memory-mode (remote) pages persist the choice in this browser's localStorage. */
+  private readonly local: boolean
 
   /**
    * @param ctx - owning context (change events are emitted on it; the scope
@@ -190,7 +205,11 @@ export class LocaleRuntime {
     const locales = this.localeList()
     this.provisional = resolveInitialLocale(locales, bootstrap?.languages)
     this.preference = bootstrap?.preference ?? undefined
-    this.snapshot = Object.freeze({ active: this.resolveActive(), locales, revision: 0 })
+    // A native shell carries its own stored preference; only a plain remote
+    // browser, whose Host scope never persists, falls back to localStorage.
+    this.local = bootstrap === undefined && host?.getSnapshot().mode === 'memory'
+    if (this.local) this.preference = readLocalLocalePreference()
+    this.snapshot = this.freeze(this.resolveActive(), locales, 0)
     if (host !== undefined) {
       ctx.effect(() => host.subscribe(() => { this.adopt(host) }), 'locale: settings scope adoption')
       this.adopt(host)
@@ -241,7 +260,7 @@ export class LocaleRuntime {
   }
 
   /**
-   * Switch the active locale — the only user preference write entry.
+   * Switch the active locale — the user preference write entry ({@link clearPreference} is the clear).
    *
    * The durable write happens even when the id already matches the active
    * locale, because the active value may be a provisional browser-derived or
@@ -255,9 +274,31 @@ export class LocaleRuntime {
   setLocale(id: string): void {
     const match = this.catalog.get(localeKey(id))
     if (match === undefined) throw new Error(`locale "${id}" is not registered`)
+    const changed = this.preference !== match.id
     this.preference = match.id
-    if (this.snapshot.active !== match.id) this.publish(match.id, true)
+    // The render refresh also covers a first explicit pick of the language
+    // already on screen: the snapshot's `preference` flips from absent.
+    if (this.snapshot.active !== match.id || changed) this.publish(match.id, this.snapshot.active !== match.id)
     void this.host?.set(LOCALE_PREFERENCE_FIELD, match.id)
+    if (this.local) writeLocalLocalePreference(match.id)
+  }
+
+  /**
+   * Drop the explicit selection, so the active locale follows the browser's
+   * ordered language list again (the "follow device" choice; the language
+   * counterpart of Appearance's "System"). Loopback pages unset
+   * `locale.preference` in the Host document, memory-mode pages remove the
+   * browser's stored choice, and the browser-derived locale is published at
+   * once. Clearing when nothing is chosen still writes, for the same reason
+   * {@link setLocale} does: another browser sharing the home may hold one.
+   */
+  clearPreference(): void {
+    const changed = this.preference !== undefined
+    this.preference = undefined
+    const target = this.resolveActive()
+    if (this.snapshot.active !== target || changed) this.publish(target, this.snapshot.active !== target)
+    void this.host?.unset(LOCALE_PREFERENCE_FIELD)
+    if (this.local) clearLocalLocalePreference()
   }
 
   /**
@@ -304,10 +345,11 @@ export class LocaleRuntime {
   private adopt(host: ConfigForm<LocaleSettings>): void {
     const section = host.getSnapshot().value
     if (section === undefined) return
+    const changed = this.preference !== section.preference
     this.preference = section.preference
     const target = this.resolveActive()
-    if (this.snapshot.active === target) return
-    this.publish(target, true)
+    if (this.snapshot.active === target && !changed) return
+    this.publish(target, this.snapshot.active !== target)
   }
 
   /** Recompute browser fallback and publish the current catalog. */
@@ -482,6 +524,16 @@ export class LocaleRuntime {
     return undefined
   }
 
+  /** Build one immutable snapshot carrying the current explicit selection. */
+  private freeze(active: LocaleId, locales: readonly LocaleDefinition[], revision: number): LocaleSnapshot {
+    return Object.freeze({
+      active,
+      ...(this.preference === undefined ? {} : { preference: this.preference }),
+      locales,
+      revision,
+    })
+  }
+
   /**
    * Advance the snapshot revision and notify LocaleFace subscribers (render
    * refresh). Only an active-locale switch additionally emits
@@ -494,11 +546,7 @@ export class LocaleRuntime {
     localeChanged: boolean,
     locales: readonly LocaleDefinition[] = this.snapshot.locales,
   ): void {
-    this.snapshot = Object.freeze({
-      active,
-      locales,
-      revision: this.snapshot.revision + 1,
-    })
+    this.snapshot = this.freeze(active, locales, this.snapshot.revision + 1)
     if (localeChanged) this.ctx.emit('locale/change', this.snapshot)
     for (const fn of [...this.listeners]) {
       try {
@@ -544,7 +592,14 @@ function detectBrowserLocale(locales: readonly LocaleDefinition[], languages?: r
     const exact = locales.find(locale => localeKey(locale.id) === requested)
     if (exact !== undefined) return exact.id
     const primary = requested.split('-')[0]
-    const match = locales.find(locale => localeKey(locale.id).split('-')[0] === primary)
+    // Tracy: a Traditional-script Chinese tag (zh-TW, zh-HK, zh-MO, any Hant) never lands on a
+    // Simplified `zh` pack by its primary subtag; it may only match a Traditional pack, else the
+    // walk goes on to the next tag and ends at FALLBACK_LOCALE (English), as tracy-web does.
+    const traditional = primary === 'zh' && TRADITIONAL_CHINESE.test(requested)
+    const match = locales.find(locale => {
+      const key = localeKey(locale.id)
+      return key.split('-')[0] === primary && (!traditional || TRADITIONAL_CHINESE.test(key))
+    })
     if (match !== undefined) return match.id
   }
   return undefined

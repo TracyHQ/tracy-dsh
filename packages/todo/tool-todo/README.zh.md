@@ -91,11 +91,15 @@ agent 每次更新都发送完整列表；新列表替换旧列表，因此没�
 
 ### 会话投影
 
-当组合挂载 `ctx.sessionProjections`（[`@deepseek-ai/dsh-session-projection`](../../session/session-projection/README.zh.md)）时，本包在注入的子插件中注册 `todos` 单元：投影即有效计划——最新的整份 `todo/write` 列表，首次写入前为 `null`，下一轮次开始时清空，而 `turn/end` 保留刚完成的清单。该键在此处合并进 `SessionProjectionMap`；载体通过历史尾页与 `session/projection` 推送帧提供该值。未挂载注册表的组合不受影响；单元注册见 [src/index.ts](src/index.ts)。
+当组合挂载 `ctx.sessionProjections`（[`@deepseek-ai/dsh-session-projection`](../../session/session-projection/README.zh.md)）时，本包在注入的子插件中注册 `todos` 单元：投影即有效计划——最新的整份 `todo/write` 列表，首次写入前为 `null`，下一轮次开始时清空，除非仍有条目处于 `in_progress`（进行中的计划会跨过客户的下一条消息存活），而 `turn/end` 保留刚完成的清单。agent 通过 `todo_write` 写出的清单在其 `todo/write` 上带有 `by: 'agent'`；agent 的轮次结束时，其 `in_progress` 条目显示为 `pending`，因为在再次请求 agent 之前没有人处理它们。不带 `by` 的清单——宿主插件报告它在任何轮次之外运行的作业——保留其 `in_progress` 条目。
+
+### 未完成的计划
+
+轮次结束前，插件监听 `agent/turn-stopping`：若 agent 自己的最新清单仍有未 `completed` 的条目，就用一条 `tool-todo` 提示再推进一步，列出这些条目并请 agent 继续或更新清单。同一份未变的清单只提示一次，因此再次停下的 agent 仍会结束轮次；宿主写入的清单从不触发。轮次中途发来的提问会被拼进轮次，而模型往往答完就停，这正是把它们拉回来的机制。该键在此处合并进 `SessionProjectionMap`；载体通过历史尾页与 `session/projection` 推送帧提供该值。未挂载注册表的组合不受影响；单元注册见 [src/index.ts](src/index.ts)。
 
 ### 持久日志不变式
 
-不变式伴生插件注册到 `ctx.invariants`，先分别校验既有会话与新公布会话一次，再为实时追加推进按会话提交的轮次轨迹。它会拒绝畸形条目、空或重复 content、未知状态，以及开放轮次之外的持久 `todo/write`；核心 session 通用处理声明合并事件，而本生产包拥有 todo 专用规则。它刻意不约束有多少条目处于 `in_progress`，因为那是工具按部署制定的策略，而非持久数据规则。
+不变式伴生插件注册到 `ctx.invariants`，先分别校验既有会话与新公布会话一次，再检查每一次实时追加。它会拒绝畸形条目、空或重复 content 以及未知状态；一条 `todo/write` 可以位于一个轮次之内，也可以位于两个轮次之间，因为模型以外的生产者（宿主插件报告它在任何轮次之外运行的作业）正是写在那里。核心 session 通用处理声明合并事件，而本生产包拥有 todo 专用规则。它刻意不约束有多少条目处于 `in_progress`，因为那是工具按部署制定的策略，而非持久数据规则。
 
 ### 调用机制
 

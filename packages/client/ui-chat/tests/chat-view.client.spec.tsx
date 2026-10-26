@@ -26,12 +26,14 @@ import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/c
 import type { KeyedSnapshotSelectorHook, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { createSnapshotStore, type ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
+import type { UserTextFold } from '@deepseek-ai/dsh-client-ui-primitives'
 import { EMPTY_CONVERSATION_SNAPSHOT } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { createChatStore } from '../src/client/stores.ts'
 import { derivePresentationPolicy } from '../src/client/presentation-policy.ts'
 import { ChatView } from '../src/client/chat/ChatView.tsx'
+import { createChatLocal } from '../src/client/chat-local.ts'
 import { ChatNodeSeat } from '../src/client/chat/ChatNodeSeat.tsx'
 import { useTurnDataValue } from '../src/client/chat/use-turn-data.ts'
 import { bindDisclosure } from '../src/client/chat/use-disclosure.ts'
@@ -304,6 +306,7 @@ function makeHarness(
     read: () => savedScroll,
   }
   const forkAt = vi.fn()
+  const localRows = createChatLocal(() => chatSource.source.getSnapshot()).for(SID)
   // Rows and the harness must observe the same chat-store instance.
   const chat = createChatStore().create()
   const transcriptView = createSnapshotStore<TranscriptViewMode>('compact')
@@ -439,6 +442,8 @@ function makeHarness(
     useStore: bindSnapshotSelector(chat),
     actions: chat.actions,
     usePresentation: bindSnapshotSelector(derivePresentationPolicy(transcriptView)),
+    useTextFolds: bindSnapshotSelector(createSnapshotStore<readonly UserTextFold[]>([])),
+    useLocalRows: bindSnapshotSelector(localRows.nodes),
     renderSlot,
     SessionProvider: SessionProviderStub,
     inspectCall: (callId: string) => { openView('trajectory', callId) },
@@ -479,7 +484,7 @@ function makeHarness(
     set, setSession: session.set, setChat: chatSource.set, ChatView, props,
     openFile, openSkill, loadOlder, loadThrough, openView,
     setOutline: (value: unknown) => { outlineValue = value },
-    chatScroll, forkAt, toolOwners,
+    chatScroll, forkAt, toolOwners, localRows,
     setPerformanceUsage: (mode: 'compact' | 'detailed') => { performanceUsage.set(mode) },
     setGrouped: (value: ConversationGroupedView<ProcessGroupData> | undefined) => {
       grouped = value
@@ -1628,7 +1633,7 @@ describe('ChatView', () => {
     expect(writeText).toHaveBeenCalledWith('interrupt now')
     expect(within(pendingBubble as HTMLElement).queryByRole('button', { name: '在新对话中分支' })).toBeNull()
     expect(turnProcessControl(view.container)).toBeNull()
-    expect(runningContent(view.container)?.textContent).toMatch(/^深度求索中，用时 \d+秒 ···$/)
+    expect(runningContent(view.container)?.textContent).toMatch(/^思考中，用时 \d+秒 ···$/)
     expect(view.getByRole('status').compareDocumentPosition(view.getByText('interrupt now'))
       & Node.DOCUMENT_POSITION_PRECEDING).not.toBe(0)
 
@@ -1733,6 +1738,40 @@ describe('ChatView', () => {
     // The delayed snapshot retirement changes nothing visible.
     act(() => { h.setSession({ pendingSubmissions: [] }) })
     expect(view.getAllByText('即发即显')).toHaveLength(1)
+  })
+
+  it('draws a registered fenced-block fold identically in the echo and the durable row', () => {
+    const fold: UserTextFold = {
+      fence: 'note-block',
+      fold: (block, after) => ({
+        label: /name="([^"]*)"/u.exec(block)?.[1] ?? '',
+        trailing: after.startsWith('\nNOTE') ? after.length : 0,
+      }),
+    }
+    const text = 'Make it bigger\n\n```note-block\n<el name="Services">\n```\nNOTE for the model'
+    const h = makeHarness(
+      { nodes: [assistant(1, 'working')] },
+      { pendingSubmissions: [{ requestId: 'req-1' as never, placement: 'transcript', time: 5_000, text, attachments: [] }] },
+    )
+    const props = { ...h.props, useTextFolds: bindSnapshotSelector(createSnapshotStore<readonly UserTextFold[]>([fold])) }
+    const view = render(<h.ChatView {...props} />)
+    const bubbleOf = (): Element => view.container.querySelector('[data-ref-chip="fold"]')!.parentElement!
+    const echo = view.container.querySelector('[data-submission-echo]')!
+    expect(echo.querySelector('[data-ref-chip="fold"]')!.textContent).toBe('Services')
+    expect(echo.textContent).not.toContain('NOTE')
+    expect(echo.textContent).not.toContain('```')
+    const echoBubble = bubbleOf().outerHTML
+    act(() => {
+      h.setChat({
+        nodes: [
+          assistant(1, 'working'),
+          { kind: 'user', seq: 2, time: 2_000, content: [{ type: 'text', text }] as never, source: { kind: 'user', rpcId: 'req-1' } },
+        ],
+      })
+    })
+    expect(view.container.querySelector('[data-submission-echo]')).toBeNull()
+    // Byte-for-byte the same bubble: nothing changes size when the durable row replaces the echo.
+    expect(bubbleOf().outerHTML).toBe(echoBubble)
   })
 
   it.each(['compact', 'standard', 'detailed'] as const)(
@@ -2129,7 +2168,7 @@ describe('ChatView', () => {
     const statuses = view.getAllByRole('status')
     expect(statuses.map(status => status.textContent)).toEqual([
       '本轮运行失败API 密钥无效AUTH',
-      '本轮运行失败plugin exploded',
+      '本轮运行失败出现问题。请重试。',
       '本轮运行失败当前请求的额度已用尽QUOTA',
       '本轮运行失败当前请求的额度已用尽ACCOUNT_QUOTA',
     ])
@@ -2138,6 +2177,41 @@ describe('ChatView', () => {
     expect(view.queryByRole('alert')).toBeNull()
     expect(view.queryByRole('dialog')).toBeNull()
     expect(view.queryByRole('button', { name: '去充值' })).toBeNull()
+  })
+
+  it('names a missing image as the reason instead of the raw failure text', () => {
+    const h = makeHarness({ nodes: [user(1, 'try'), turnError(3, 'ATTACHMENT_MISSING')] })
+    const view = render(<h.ChatView {...h.props} />)
+    expect(view.getAllByRole('status').map(status => status.textContent)).toEqual([
+      '本轮运行失败对话中的一张图片已丢失或无法读取。请重新附上图片后再发送。ATTACHMENT_MISSING',
+    ])
+  })
+
+  it('Tracy: an untranslated code shows one generic line and keeps the raw message as its title', () => {
+    const h = makeHarness({ nodes: [
+      user(1, 'try'),
+      { ...turnError(3, 'INVALID_RESPONSE'), message: 'DeepSeek Messages stream: tool input is invalid JSON' },
+      turnError(4, 'UNKNOWN'),
+    ] })
+    const view = render(<h.ChatView {...h.props} />)
+    expect(view.getAllByRole('status').map(status => status.textContent)).toEqual([
+      '本轮运行失败出现问题。请重试。INVALID_RESPONSE',
+      '本轮运行失败出现问题。请重试。UNKNOWN',
+    ])
+    expect(view.getAllByTitle('DeepSeek Messages stream: tool input is invalid JSON')).toHaveLength(1)
+    expect(view.getAllByTitle('plugin exploded')).toHaveLength(1)
+  })
+
+  it('Tracy: a product-scoped code keeps the message its producer wrote', () => {
+    const h = makeHarness({ nodes: [
+      user(1, 'try'),
+      { ...turnError(3, 'tracy/subscription-quota'), message: 'Bạn đã dùng hết lượt AI của tháng này.' },
+    ] })
+    const view = render(<h.ChatView {...h.props} />)
+    expect(view.getAllByRole('status').map(status => status.textContent)).toEqual([
+      '本轮运行失败Bạn đã dùng hết lượt AI của tháng này.tracy/subscription-quota',
+    ])
+    expect(view.container.querySelector('[title]')).toBeNull()
   })
 
   it('renders the max-tokens notice with localized guidance, distinct from turn errors', () => {
@@ -2281,7 +2355,7 @@ describe('ChatView', () => {
     const view = render(<h.ChatView {...h.props} />)
     expect(renderedFlowKinds(view.container)).toEqual(['user', 'turn-process'])
     expect(turnProcessControl(view.container)).toBeNull()
-    expect(runningContent(view.container)?.textContent).toMatch(/^深度求索中，用时 \d+秒 ···$/)
+    expect(runningContent(view.container)?.textContent).toMatch(/^思考中，用时 \d+秒 ···$/)
     expect(view.container.querySelector('[data-chat-flow-kind="system-prompt"]')).toBeNull()
 
     act(() => {
@@ -2464,7 +2538,7 @@ describe('ChatView', () => {
     })
     const view = render(<h.ChatView {...h.props} />)
     expect(turnProcessControl(view.container)).toBeNull()
-    expect(runningContent(view.container)?.textContent).toMatch(/^深度求索中，用时 \d+秒 ···$/)
+    expect(runningContent(view.container)?.textContent).toMatch(/^思考中，用时 \d+秒 ···$/)
     const processRow = view.getByText('inspect').closest('[data-chat-flow-kind="assistant-step"]') as HTMLElement
     expect(processRow.getAttribute('hidden')).toBeNull()
 
@@ -3232,9 +3306,9 @@ describe('ChatView', () => {
     const view = render(<h.ChatView {...h.props} />)
     expect(view.getByTestId('tool-seat-r1')).toBeTruthy()
     expect(h.toolOwners[0]?.block).toMatchObject({ callId: 'r1', argsRaw: '{"command":"cmd-r1"}' })
-    expect(view.getByRole('status').textContent).toBe('深度求索中')
+    expect(view.getByRole('status').textContent).toBe('思考中')
     expect(turnProcessControl(view.container)).toBeNull()
-    expect(runningContent(view.container)?.textContent).toMatch(/^深度求索中，用时 \d+秒 ···$/)
+    expect(runningContent(view.container)?.textContent).toMatch(/^思考中，用时 \d+秒 ···$/)
   }))
 
   it('keeps the Tool renderer mounted when a running call settles into log order', () => {
@@ -3294,9 +3368,9 @@ describe('ChatView', () => {
     const view = render(<h.ChatView {...h.props} />)
     const status = view.getByRole('status')
     const content = runningContent(view.container)!
-    expect(content.textContent).toMatch(/^深度求索中，用时 \d+分\d+秒 ···$/)
+    expect(content.textContent).toMatch(/^思考中，用时 \d+分\d+秒 ···$/)
     expect(turnProcessControl(view.container)).toBeNull()
-    expect(status.textContent).toBe('深度求索中')
+    expect(status.textContent).toBe('思考中')
     expect(status.getAttribute('aria-live')).toBe('polite')
     expect(status.getAttribute('aria-atomic')).toBe('true')
     expect(content.closest('[aria-live]')).toBeNull()
@@ -3309,23 +3383,23 @@ describe('ChatView', () => {
         role: 'user', source: { kind: 'user' },
       }] } })
     })
-    expect(content.textContent).toMatch(/^深度求索中，用时 \d+分\d+秒 ···$/)
+    expect(content.textContent).toMatch(/^思考中，用时 \d+分\d+秒 ···$/)
     const beforeTick = content.textContent
     act(() => { vi.advanceTimersByTime(2_000) })
-    expect(content.textContent).toMatch(/^深度求索中，用时 \d+分\d+秒 ···$/)
+    expect(content.textContent).toMatch(/^思考中，用时 \d+分\d+秒 ···$/)
     expect(content.textContent).not.toBe(beforeTick)
     expect(view.getByRole('status')).toBe(status)
-    expect(status.textContent).toBe('深度求索中')
+    expect(status.textContent).toBe('思考中')
     act(() => {
       h.setSession({ testInbox: { 'next-turn': [], 'next-step': [] } })
       h.setChat({ nodes: [trigger, { ...steering(2, 'also', 1), time: 128_000 }] })
     })
     expect(runningContent(view.container)).toBe(content)
-    expect(content.textContent).toMatch(/^深度求索中，用时 \d+分\d+秒 ···$/)
+    expect(content.textContent).toMatch(/^思考中，用时 \d+分\d+秒 ···$/)
     expect(view.getByText('also').closest('[data-pending-steering]')).toBeNull()
     act(() => { vi.advanceTimersByTime(1_000) })
-    expect(content.textContent).toMatch(/^深度求索中，用时 \d+分\d+秒 ···$/)
-    expect(status.textContent).toBe('深度求索中')
+    expect(content.textContent).toMatch(/^思考中，用时 \d+分\d+秒 ···$/)
+    expect(status.textContent).toBe('思考中')
     view.unmount()
     expect(vi.getTimerCount()).toBe(0)
   }))
@@ -3339,14 +3413,14 @@ describe('ChatView', () => {
     )
     const view = render(<h.ChatView {...h.props} />)
     const content = runningContent(view.container)!
-    expect(content.textContent).toMatch(/^深度求索中，用时 \d+分\d+秒 ···$/)
+    expect(content.textContent).toMatch(/^思考中，用时 \d+分\d+秒 ···$/)
     act(() => { vi.advanceTimersByTime(1_000) })
-    expect(content.textContent).toMatch(/^深度求索中，用时 \d+小时\d+分\d+秒 ···$/)
+    expect(content.textContent).toMatch(/^思考中，用时 \d+小时\d+分\d+秒 ···$/)
     const hourlyText = content.textContent
     act(() => { vi.advanceTimersByTime(303_000) })
-    expect(content.textContent).toMatch(/^深度求索中，用时 \d+小时\d+分\d+秒 ···$/)
+    expect(content.textContent).toMatch(/^思考中，用时 \d+小时\d+分\d+秒 ···$/)
     expect(content.textContent).not.toBe(hourlyText)
-    expect(view.getByRole('status').textContent).toBe('深度求索中')
+    expect(view.getByRole('status').textContent).toBe('思考中')
     view.unmount()
     expect(vi.getTimerCount()).toBe(0)
   }))
@@ -4062,6 +4136,40 @@ describe('ChatView', () => {
     expect(ov.getByText('已完成')).toBeTruthy()
   })
 
+  it('ends a settled command like an agent reply: copy, branch after its lifecycle, clock, no rating (Tracy tracy.42)', () => {
+    const settled = makeHarness({ nodes: [user(1, 'hi'), { ...command(), settledSeq: 6 } as CommandNode] })
+    const view = render(<settled.ChatView {...settled.props} />)
+    const row = view.container.querySelector('[data-chat-flow-kind="command"] [data-answer-actions]') as HTMLElement
+    expect(row.getAttribute('data-actions-reveal')).toBe('always')
+    expect([...row.querySelectorAll('button')].map(button => button.getAttribute('aria-label')))
+      .toEqual(['复制', '在新对话中分支'])
+    expect(row.querySelector('[data-clock="end"]')?.textContent).not.toBe('')
+    fireEvent.click(within(row).getByRole('button', { name: '在新对话中分支' }))
+    expect(settled.forkAt).toHaveBeenCalledWith(6)
+
+    // Still running: no row yet, as an agent turn has none until it ends.
+    const executing = makeHarness({
+      nodes: [command({ seq: 7, commandId: 'cmd-3' as CommandNode['commandId'], outcome: null })],
+    })
+    const xv = render(<executing.ChatView {...executing.props} />)
+    expect(xv.container.querySelector('[data-chat-flow-kind="command"] [data-answer-actions]')).toBeNull()
+  })
+
+  it('ends a settled /compact like an agent reply, copying its summary (Tracy tracy.42)', () => {
+    const h = makeHarness({
+      nodes: [command({
+        commandId: 'cmd-compact' as CommandNode['commandId'],
+        name: 'compact',
+        outcome: { kind: 'success', text: 'Compacted 16 history items (~11309 tokens).', sourceEventSeq: 7 },
+      }), compaction()],
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const row = view.container.querySelector('[data-answer-actions]') as HTMLElement
+    expect(row.getAttribute('data-actions-reveal')).toBe('always')
+    expect(within(row).getByRole('button', { name: '复制' })).toBeTruthy()
+    expect(within(row).queryByRole('button', { name: /Good|Bad/ })).toBeNull()
+  })
+
   it('renders /compact as one stateful disclosure from running through completion', () => {
     const running = command({
       commandId: 'cmd-compact' as CommandNode['commandId'],
@@ -4109,7 +4217,9 @@ describe('ChatView', () => {
     })
     const noHistoryView = render(<noHistory.ChatView {...noHistory.props} />)
     expect(noHistoryView.getByText('No compactable history yet.')).toBeTruthy()
-    expect(noHistoryView.queryByRole('button')).toBeNull()
+    // No disclosure: the only buttons are the settled row's actions (Tracy tracy.42).
+    expect(noHistoryView.queryByRole('button', { name: /compact/ })).toBeNull()
+    expect(noHistoryView.getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(['复制'])
 
     const failed = makeHarness({
       nodes: [command({
@@ -4129,8 +4239,8 @@ describe('ChatView', () => {
     const column = view.container.querySelector('[data-chat-flow]')!
     const status = column.querySelector('[data-chat-running]')
     expect(column.lastElementChild).toBe(status)
-    expect(within(status as HTMLElement).getByRole('status').textContent).toBe('深度求索中')
-    expect(status?.lastElementChild?.textContent).toBe('深度求索中')
+    expect(within(status as HTMLElement).getByRole('status').textContent).toBe('思考中')
+    expect(status?.lastElementChild?.textContent).toBe('思考中')
     const icon = status?.querySelector('svg')?.parentElement
     expect(icon?.getAttribute('aria-hidden')).toBe('true')
     expect(icon?.firstElementChild?.tagName).toBe('SPAN')
@@ -4139,5 +4249,82 @@ describe('ChatView', () => {
     expect(status?.querySelector('animate')).toBeNull()
     act(() => { h.setSession({ running: false }) })
     expect(column.querySelector('[data-chat-running]')).toBeNull()
+  })
+})
+
+describe('ChatView client-local rows', () => {
+  /** Rows as drawn, `kind@anchorSeq` for log rows and `local:<id>` for local ones. */
+  const drawnRows = (container: HTMLElement): string[] =>
+    [...container.querySelectorAll<HTMLElement>('[data-row]')].map(row => row.dataset.row!)
+  const tagRows = (h: ReturnType<typeof makeHarness>): void => {
+    h.setNodeRenderer(((_key: string, owner: object) => {
+      const node = (owner as { node: { kind: string; anchorSeq: number; id: string; key: string } }).node
+      const tag = node.key.startsWith('local:') ? `local:${node.id}` : `${node.kind}@${String(node.anchorSeq)}`
+      return <span data-row={tag} />
+    }) as React.ComponentProps<typeof ChatNodeSeat>['renderSlot'])
+  }
+  const addLocal = (h: ReturnType<typeof makeHarness>, id: string, anchorSeq: number): void => {
+    act(() => { h.localRows.upsert({ id, kind: 'unknown', anchorSeq, data: {} } as never) })
+  }
+
+  it('draws a row after every log row at or below its anchor and above the agent rows written later', () => {
+    const h = makeHarness({ nodes: [user(1, 'ask'), assistant(2, 'answer')] })
+    tagRows(h)
+    const view = render(<h.ChatView {...h.props} />)
+    const before = drawnRows(view.container)
+    addLocal(h, 'q', 2)
+    const rows = drawnRows(view.container)
+    const at = rows.indexOf('local:q')
+    expect(at).toBeGreaterThan(-1)
+    // Everything at or below the anchor sits above it, in the order it already had.
+    const seqOf = (tag: string): number => Number(tag.split('@')[1])
+    expect(rows.slice(0, at)).toEqual(before.filter(tag => seqOf(tag) <= 2))
+    expect(rows.slice(at + 1)).toEqual(before.filter(tag => seqOf(tag) > 2))
+    // The agent writes on: its new rows land below the local row.
+    act(() => { h.setChat({ nodes: [user(1, 'ask'), assistant(2, 'answer'), assistant(5, 'more', 1, 2)] }) })
+    const later = drawnRows(view.container)
+    expect(later.indexOf('local:q')).toBe(at)
+    expect(later.slice(0, at).every(tag => seqOf(tag) <= 2)).toBe(true)
+    expect(later.slice(at + 1).filter(tag => seqOf(tag) > 2).length).toBeGreaterThan(before.filter(tag => seqOf(tag) > 2).length)
+  })
+
+  it('marks a local request or answer as an exchange on its flow item, and no other local row (Tracy tracy.42)', () => {
+    const h = makeHarness({ nodes: [user(1, 'ask'), assistant(2, 'answer')] })
+    tagRows(h)
+    const view = render(<h.ChatView {...h.props} />)
+    act(() => {
+      h.localRows.upsert({ id: 'q', kind: 'unknown', anchorSeq: 2, data: {}, exchange: true } as never)
+      h.localRows.upsert({ id: 'tip', kind: 'unknown', anchorSeq: 2, data: {} } as never)
+    })
+    const flowOf = (id: string) => view.container.querySelector(`[data-row="local:${id}"]`)?.closest('[data-chat-local]')
+    expect(flowOf('q')?.hasAttribute('data-chat-exchange')).toBe(true)
+    expect(flowOf('tip')?.hasAttribute('data-chat-exchange')).toBe(false)
+  })
+
+  it('orders local rows by anchor, then by insertion; remove() and clear() take them out again', () => {
+    const h = makeHarness({ nodes: [user(1, 'ask'), assistant(4, 'answer', 1, 1)] })
+    tagRows(h)
+    const view = render(<h.ChatView {...h.props} />)
+    addLocal(h, 'late', 4)
+    addLocal(h, 'early', 1)
+    addLocal(h, 'late2', 4)
+    const rows = drawnRows(view.container)
+    expect(rows.filter(tag => tag.startsWith('local:'))).toEqual(['local:early', 'local:late', 'local:late2'])
+    expect(rows.indexOf('local:early')).toBeLessThan(rows.indexOf('local:late'))
+    act(() => { h.localRows.remove('late') })
+    expect(drawnRows(view.container).filter(tag => tag.startsWith('local:'))).toEqual(['local:early', 'local:late2'])
+    act(() => { h.localRows.clear() })
+    expect(drawnRows(view.container).some(tag => tag.startsWith('local:'))).toBe(false)
+  })
+
+  it('a session without local rows draws exactly what it drew before', () => {
+    const h = makeHarness({ nodes: [user(1, 'ask'), assistant(2, 'answer')] })
+    tagRows(h)
+    const view = render(<h.ChatView {...h.props} />)
+    const before = drawnRows(view.container)
+    addLocal(h, 'q', 2)
+    act(() => { h.localRows.remove('q') })
+    expect(drawnRows(view.container)).toEqual(before)
+    expect(view.container.querySelector('[data-chat-local]')).toBeNull()
   })
 })

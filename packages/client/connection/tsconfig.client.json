@@ -10,6 +10,7 @@
     "src/client/api.ts",
     "src/client/connection.ts",
     "src/client/index.ts",
+    "src/client/page-base.ts",
     "src/client/random-uuid.ts",
     "src/client/rpc.ts",
     "src/loopback-hostname.ts",

@@ -92,11 +92,13 @@ admit(request: ConnectionTrustRequest): PeerAdmission
 
 /**
  * Authenticate one frontend index request, owning a token redirect or 401.
- * @param request - root or configured-index HTTP request.
+ * @param request - root or configured-index HTTP request, its URL already stripped of any mount prefix.
  * @param response - response owned when the result is false.
+ * @param mount - the mount prefix the page is served under ('' at the root): the session
+ * cookie is scoped to it and the clean redirect after a token exchange returns to it.
  * @returns true only when the frontend may serve index.html.
  */
-authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean
+authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, mount?: string): boolean
 
 /**
  * Add the fresh process token to an ordinary Web application URL.
@@ -115,6 +117,17 @@ Source: [`packages/client/connection/src/rpc.ts`](../../packages/client/connecti
 The browser HTTP carrier service. Activation listens immediately. Route registration order does not affect requests because configured named routes must be distinct, and the fallback handler answers anything not yet claimed during startup with 404 until its owner registers. A listen failure rejects initialization, and the boot process reports the failed fiber.
 
 ```ts cordis-catalog
+/**
+ * The path prefix a trusted proxy mounted this request under — '' at the
+ * root, else an absolute path with no trailing slash (`/site.example`). It
+ * was already removed from `req.url`; handlers that emit absolute URLs put
+ * it back in front of theirs, so a page served at `/site.example/` links to
+ * `/site.example/api` and not to the root of a host that has no `/api`.
+ * @param req - a request (or upgrade request) this server is handling.
+ * @returns the mount prefix, or '' when none applied.
+ */
+mountOf(req: IncomingMessage): string
+
 /**
  * Register a named route. Duplicate (kind, path) throws — route patterns are
  * a composition-level contract, so a collision is a misconfiguration.

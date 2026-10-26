@@ -156,7 +156,10 @@ describe('real Loader composition', () => {
       // it precedes every injected row and tap markup, so the shell's
       // app-owned routes and the Host's resource rows resolve under one mount.
       expect(got.body.match(/<base\b/g)).toHaveLength(1)
-      const base = got.body.indexOf('<base href="./">')
+      // Tracy: the base is the absolute mount (`/` here), not upstream's `./` —
+      // the shell is also served at `s/<id>`, where `./` would resolve to `/s/`.
+      const base = got.body.indexOf('<base href="/">')
+      expect(base).toBeGreaterThanOrEqual(0)
       expect(base).toBeLessThan(got.body.indexOf('<link rel="preload" as="script" href="plugins/boot.js">'))
       expect(base).toBeLessThan(got.body.indexOf('<script>window.__T__=1</script>'))
     }
@@ -168,6 +171,39 @@ describe('real Loader composition', () => {
     })
     untap()
     expect((await request(port, '/', authenticated())).body).not.toContain('__T__')
+
+    // Behind a proxy that mounts dsh under a path, the index anchors relative asset URLs at
+    // that mount and the launch-token exchange comes back to it — a page served at
+    // `/site.example/` must not send its browser to `/api` on a host that has no `/api`.
+    const mounted = (init?: RequestInit): RequestInit => {
+      const headers = new Headers(init?.headers)
+      headers.set('x-forwarded-prefix', '/site.example')
+      return { ...init, headers }
+    }
+    const rootIndex = await request(port, '/', authenticated())
+    expect(rootIndex.status).toBe(200)
+    expect(rootIndex.body).toContain('<base href="/">')
+    const mountedIndex = await request(port, '/site.example/', mounted(authenticated()))
+    expect(mountedIndex).toMatchObject({ status: 200, type: 'text/html; charset=utf-8' })
+    expect(mountedIndex.body).toContain('<base href="/site.example/">')
+    expect(await request(port, '/site.example/app.js', mounted())).toMatchObject({ status: 200, body: 'export const rebuilt = true' })
+    // The shell's own address space: `s/<sessionId>` is the index (the page then selects the
+    // session it names), at the root and under a mount alike; an asset-shaped segment is not.
+    const sessionAddress = await request(port, '/s/session-1a2b', authenticated())
+    expect(sessionAddress.status).toBe(200)
+    expect(sessionAddress.type).toBe('text/html; charset=utf-8')
+    expect(sessionAddress.body).toContain('<base href="/">')
+    const mountedSession = await request(port, '/site.example/s/session-1a2b', mounted(authenticated()))
+    expect(mountedSession.status).toBe(200)
+    expect(mountedSession.body).toContain('<base href="/site.example/">')
+    expect(await request(port, '/s/missing.js', authenticated())).toEqual({ status: 404, type: null, body: '' })
+    expect((await request(port, '/s/session-1a2b')).status).toBe(401)
+    const mountedLaunch = new URL(launchUrl)
+    mountedLaunch.pathname = '/site.example/'
+    const mountedExchange = await fetch(mountedLaunch, { redirect: 'manual', ...mounted() })
+    expect(mountedExchange.status).toBe(303)
+    expect(mountedExchange.headers.get('location')).toBe('/site.example/')
+    expect(mountedExchange.headers.get('set-cookie')).toContain('; Path=/site.example;')
 
     // A missing configured index follows the same empty-404 contract for both
     // of its public entry paths and for both supported methods.

@@ -20,22 +20,28 @@ import { Button, IconPanelLeftOutlineRegular, Tooltip } from '@deepseek-ai/dsh-c
 import type { PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { createSidebarRightStore } from '../stores.ts'
+import type { GuideInjected } from '../tabs/guide/GuideBody.tsx'
 import css from './ExpandButton.module.css'
 
-/** The button's props: the header corner seat, the shared store, and copy. */
+/** The button's props: the header corner seat, the shared store, the registry's doors, and copy. */
 export type ExpandButtonProps =
   & PropsRuntime<'conversation.session.header.corner'>
   & PropsStore<ReturnType<typeof createSidebarRightStore>>
+  & InjectFace<GuideInjected>
   & PropsLocale<'sidebarRight'>
   & InjectFace<{ hooks: { shortcuts: HostObservable<readonly ShortcutCatalogEntry[]> } }>
 
-/** The expand control while the panel is collapsed; nothing while it is shown. */
-export function ExpandButton({ sessionId, useStore, actions, t, useShortcuts }: ExpandButtonProps): ReactNode {
+/** The expand control while the panel is collapsed and has something to open onto; nothing otherwise. */
+export function ExpandButton({ sessionId, useStore, useGuideEntries, actions, t, useShortcuts }: ExpandButtonProps): ReactNode {
   // A session with no surface yet is collapsed: the panel seat materializes the
   // surface on its own mount, and until then there is nothing expanded.
   const shortcut = useShortcuts(entries => entries.find(entry => entry.id === 'sidebar.right.toggle'))
   const expanded = useStore(state => state.bySession[sessionId]?.layout.expanded ?? false)
-  if (expanded) return null
+  // The registry's doors, observed so a type registering later brings the
+  // button with it. With none the column has nothing to open onto — the store
+  // refuses the expansion (`stores.ts`) — so the ask is not offered either.
+  const doors = useGuideEntries(entries => entries.length > 0)
+  if (expanded || !doors) return null
   return (
     <Tooltip label={t('chrome.expand')} shortcutKeys={shortcut?.keys} side="bottom" delayMs={500}>
       <Button

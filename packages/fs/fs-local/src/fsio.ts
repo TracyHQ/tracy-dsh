@@ -1,21 +1,37 @@
 /**
  * Cordis-free local filesystem mechanics. This provider layer returns validated UTF-8 text,
  * streams large files, and rejects binary data; line windows belong to `dsh-tool-fs`. Writes
- * stage an exclusive owner-only file in a private sibling directory and atomically publish it.
+ * stage an exclusive owner-only file in a private sibling directory and atomically publish it; on
+ * Linux with the native dirfd calls, every step after the parent check is relative to the parent's
+ * verified descriptor.
  * @module @deepseek-ai/dsh-fs-local/fsio
  */
 
 import { randomUUID } from 'node:crypto'
-import { createReadStream, realpath as realpathCallback } from 'node:fs'
-import { chmod, link, lstat, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
+import {
+  close as closeCallback,
+  constants,
+  createReadStream,
+  fchmod as fchmodCallback,
+  fsync as fsyncCallback,
+  realpath as realpathCallback,
+  writeFile as writeFileCallback,
+} from 'node:fs'
+import { chmod, link, lstat, mkdir, open, readdir, readlink, rename, rm, rmdir, stat } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import type { BigIntStats, Dirent, Stats } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { TextDecoder, promisify } from 'node:util'
 import { FsError, FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs'
+import { dirfdSupported, linkat, mkdirat, openat, renameat, unlinkat } from '@deepseek-ai/node-addon-system/dirfd'
 import { copyFileDaclWin32, replaceFileWin32 } from './win32.ts'
 
 const BINARY_SAMPLE_BYTES = 8192
 const realpath = promisify(realpathCallback.native)
+const closeFd = promisify(closeCallback)
+const fchmodFd = promisify(fchmodCallback)
+const fsyncFd = promisify(fsyncCallback)
+const writeFileFd = promisify(writeFileCallback)
 // Bound one non-abortable FileHandle.read so cancellation is observed between chunks.
 const DIFF_BASIS_READ_CHUNK_BYTES = 64 * 1024
 
@@ -56,18 +72,98 @@ function throwIfAborted(signal: AbortSignal | undefined, verb: string): void {
 }
 
 /**
- * `readFile` with the supplied signal, translating a mid-read `AbortError` into
- * the seam's structured `FsError('FS_ABORTED')` (Node rejects an aborted
- * `readFile` with a bare `AbortError`, which would otherwise escape the seam's
- * error taxonomy — the streaming/write paths translate it the same way).
+ * Read-only open flags. `O_NOFOLLOW` rejects a final symlink (`ELOOP`): a target key is a
+ * realpath, so its final component is a symlink only when the path changed after resolution.
+ * Windows defines no `O_NOFOLLOW`.
  */
-async function readFileAbortable(absolutePath: string, verb: 'read' | 'edit', signal?: AbortSignal): Promise<Buffer> {
+/* v8 ignore next -- each host covers one side of this platform switch. */
+const READ_OPEN_FLAGS = constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW)
+
+let procFdUnavailable = false
+
+/**
+ * Report the path the kernel holds for an open descriptor, read from `/proc/self/fd/<fd>`.
+ * A target is resolved once and opened again by name; a directory on that path swapped for a
+ * symlink in between makes the open reach a different file, which this path reveals.
+ * @param handle - the open descriptor.
+ * @returns the descriptor's canonical path, or `undefined` where the host has no
+ * `/proc/self/fd` (macOS, Windows); the first `ENOENT` is remembered for the process.
+ */
+async function openedPathOf(handle: FileHandle): Promise<string | undefined> {
+  /* v8 ignore next -- hosts without /proc/self/fd (macOS, Windows) take this path; Linux coverage holds the check. */
+  if (procFdUnavailable) return undefined
   try {
-    return await readFile(absolutePath, signal ? { signal } : {})
+    return await readlink(`/proc/self/fd/${handle.fd}`)
   } catch (error: unknown) {
-    /* v8 ignore next 2 -- a non-abort readFile rejection needs a permission/IO fault racing an open file. */
+    /* v8 ignore start -- readlink of a held descriptor fails only without /proc; any other errno is a kernel fault. */
+    if (!isENOENT(error)) throw error
+    procFdUnavailable = true
+    return undefined
+    /* v8 ignore stop */
+  }
+}
+
+/**
+ * Whether an open descriptor still names `expected`. Linux appends ` (deleted)` once the
+ * file is unlinked after the open; that file was reached at `expected`, so it still matches.
+ */
+async function openedAt(handle: FileHandle, expected: string): Promise<boolean> {
+  const opened = await openedPathOf(handle)
+  return opened === undefined || opened === expected || opened === `${expected} (deleted)`
+}
+
+function pathChangedError(verb: 'read' | 'edit' | 'write', displayPath: string, cause?: unknown): FsError {
+  return new FsError(
+    `cannot ${verb} "${displayPath}": the path changed while it was being opened`,
+    'FS_IO_ERROR',
+    cause === undefined ? undefined : { cause },
+  )
+}
+
+/**
+ * Open a resolved file for reading and require the descriptor to be the resolved target.
+ * Policy hooks judge `target.targetKey`; reading through this handle reads exactly that file.
+ * @param target - the resolved file; `targetKey` is its realpath.
+ * @param verb - names the operation in the error message.
+ * @returns an open read-only handle the caller must close.
+ * @throws FsError `FS_IO_ERROR` when the final component became a symlink or the descriptor
+ * reached a different file than `targetKey`.
+ */
+async function openTargetForRead(target: LocalTarget, verb: 'read' | 'edit'): Promise<FileHandle> {
+  let handle: FileHandle
+  try {
+    handle = await open(target.targetKey, READ_OPEN_FLAGS)
+  } catch (error: unknown) {
+    if (error instanceof Error && 'code' in error && error.code === 'ELOOP') throw pathChangedError(verb, target.displayPath, error)
+    /* v8 ignore next -- a non-ELOOP open failure needs the file removed or made unreadable after the stat preflight. */
+    throw error
+  }
+  let opensTarget = false
+  try {
+    opensTarget = await openedAt(handle, target.targetKey)
+  } finally {
+    if (!opensTarget) await handle.close()
+  }
+  if (!opensTarget) throw pathChangedError(verb, target.displayPath)
+  return handle
+}
+
+/**
+ * Read a whole resolved file through a verified handle, translating a mid-read `AbortError`
+ * into the seam's structured `FsError('FS_ABORTED')` (Node rejects an aborted read with a bare
+ * `AbortError`, which would otherwise escape the seam's error taxonomy — the streaming/write
+ * paths translate it the same way).
+ */
+async function readFileAbortable(target: LocalTarget, verb: 'read' | 'edit', signal?: AbortSignal): Promise<Buffer> {
+  const handle = await openTargetForRead(target, verb)
+  try {
+    return await handle.readFile(signal ? { signal } : {})
+  } catch (error: unknown) {
+    /* v8 ignore next 2 -- a non-abort read rejection needs a permission/IO fault racing an open file. */
     if (!isAbortError(error)) throw error
     throw new FsError(`${verb} aborted`, 'FS_ABORTED')
+  } finally {
+    await handle.close()
   }
 }
 
@@ -99,6 +195,11 @@ export interface FsIoInternals {
   removeStagingDir?: (stagingDir: string) => Promise<void>
   /** Test hook after the temp file is written/synced but before final chmod+publication. */
   inspectTemp?: (paths: { stagingDir: string; tempPath: string }) => void | Promise<void>
+  /**
+   * `false` forces path-based publication where descriptor-relative publication is available,
+   * so both paths stay covered on Linux.
+   */
+  descriptorPublication?: boolean
   /** Test hook after raw-read stat preflight and before bounded content I/O. */
   inspectReadBytesAfterStat?: (target: LocalTarget) => void | Promise<void>
 }
@@ -391,7 +492,7 @@ async function statRegularFile(target: LocalTarget, verb: 'read', signal?: Abort
  */
 export async function readWholeText(target: LocalTarget, signal?: AbortSignal): Promise<string> {
   await statRegularFile(target, 'read', signal)
-  const raw = await readFileAbortable(target.targetKey, 'read', signal)
+  const raw = await readFileAbortable(target, 'read', signal)
   throwIfAborted(signal, 'read')
   if (raw.subarray(0, BINARY_SAMPLE_BYTES).includes(0)) {
     throw new FsError(`cannot read "${target.displayPath}": binary file`, 'FS_NOT_TEXT')
@@ -422,6 +523,7 @@ export async function readWholeBytes(
   }
   await internals.inspectReadBytesAfterStat?.(target)
   const stream = createReadStream(target.targetKey, {
+    fd: await openTargetForRead(target, 'read'),
     end: maxBytes,
     ...signal ? { signal } : {},
   })
@@ -461,6 +563,7 @@ export async function readByteWindow(
   await statRegularFile(target, 'read', signal)
   if (range.length === 0) return new Uint8Array(0)
   const stream = createReadStream(target.targetKey, {
+    fd: await openTargetForRead(target, 'read'),
     start: range.offset,
     end: range.offset + range.length - 1,
     ...signal ? { signal } : {},
@@ -491,7 +594,10 @@ export async function readByteWindow(
  */
 export async function* streamWholeText(target: LocalTarget, signal?: AbortSignal): AsyncIterable<string> {
   await statRegularFile(target, 'read', signal)
-  const stream = createReadStream(target.targetKey, signal ? { signal } : {})
+  const stream = createReadStream(target.targetKey, {
+    fd: await openTargetForRead(target, 'read'),
+    ...signal ? { signal } : {},
+  })
   const decoder = new TextDecoder('utf-8', { fatal: true })
   let sampledBytes = 0
 
@@ -570,12 +676,179 @@ async function throwGuardedCreateFailure(
   throw new FsError(`cannot write "${displayPath}": ${errorMessage(error)}`, 'FS_IO_ERROR', { cause: error })
 }
 
+let dirfdAvailable: boolean | undefined
+
+/**
+ * Whether writes can publish relative to the parent's descriptor: Linux, where `/proc/self/fd`
+ * names the held directory, with a `system.node` that carries the dirfd calls.
+ */
+function descriptorPublicationAvailable(platform: NodeJS.Platform): boolean {
+  /* v8 ignore next -- each host covers one side of this platform switch. */
+  if (platform !== 'linux' || process.platform !== 'linux' || procFdUnavailable) return false
+  dirfdAvailable ??= dirfdSupported()
+  return dirfdAvailable
+}
+
+/**
+ * Open flags for a directory that must be the named entry itself, not a symlink to one. Windows
+ * defines neither flag (`| undefined` adds no bits); descriptor publication is Linux-only.
+ */
+const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
+
+/**
+ * Open the target's parent directory and require the descriptor to be `directory`.
+ * @param directory - canonical parent of the target key.
+ * @param displayPath - names the write in the error message.
+ * @returns the verified directory handle, or `undefined` where the host has no `/proc/self/fd`.
+ * @throws FsError `FS_IO_ERROR` when the parent became a symlink or the descriptor reached
+ * another directory.
+ */
+async function openVerifiedDirectory(directory: string, displayPath: string): Promise<FileHandle | undefined> {
+  let handle: FileHandle
+  try {
+    handle = await open(directory, DIRECTORY_OPEN_FLAGS)
+  } catch (error: unknown) {
+    // `mkdir` just made `directory` a directory. Linux reports a symlink there as ENOTDIR under
+    // O_DIRECTORY (ELOOP without it); either way the path changed after resolution.
+    if (isENOTDIR(error) || (error instanceof Error && 'code' in error && error.code === 'ELOOP')) {
+      throw pathChangedError('write', displayPath, error)
+    }
+    /* v8 ignore next -- any other open failure needs the parent removed or made unreadable after mkdir. */
+    throw error
+  }
+  let opened: string | undefined
+  try {
+    opened = await openedPathOf(handle)
+  } catch (error: unknown) {
+    /* v8 ignore next 2 -- readlink of a held descriptor fails only on a kernel fault. */
+    await handle.close()
+    throw error
+  }
+  /* v8 ignore next 4 -- descriptor publication is chosen only after /proc/self/fd answered. */
+  if (opened === undefined) {
+    await handle.close()
+    return undefined
+  }
+  if (opened !== directory) {
+    await handle.close()
+    throw pathChangedError('write', displayPath)
+  }
+  return handle
+}
+
+/** Everything `writeFileAtomic` resolved before choosing its publication path. */
+interface AtomicWrite {
+  absolutePath: string
+  content: string
+  mode: number | undefined
+  signal: AbortSignal | undefined
+  internals: FsIoInternals
+  createIfAbsent: { displayPath: string } | undefined
+  stagingDirName: string
+  stagingDir: string
+  tempName: string
+  tempPath: string
+}
+
+/**
+ * `writeFileAtomic` relative to the verified parent descriptor: the staging directory, the temp
+ * file, publication and cleanup each name one entry under a descriptor this process holds, so
+ * no path above the target is looked up again after the parent check and a parent swapped for a
+ * symlink cannot redirect any step. A parent moved elsewhere takes the write with it.
+ * @param dirfd - descriptor of the target's parent, verified by {@link openVerifiedDirectory};
+ * the caller closes it.
+ * @param write - the resolved write.
+ */
+async function writeFileAtomicAt(dirfd: number, write: AtomicWrite): Promise<void> {
+  const { absolutePath, content, mode, signal, internals, createIfAbsent, stagingDirName, stagingDir, tempName, tempPath } = write
+  const inspectPublicationTarget = internals.inspectPublicationTarget
+    ?? (path => lstat(path, { bigint: true }))
+  let stagingFd: number | undefined
+  let tempFd: number | undefined
+  let stagingCreated = false
+  const removeStagingDir = internals.removeStagingDir
+  const removeStaging = removeStagingDir
+    ? () => removeStagingDir(stagingDir)
+    : async () => {
+      if (stagingFd !== undefined) {
+        try {
+          await unlinkat(stagingFd, tempName)
+        } catch (error: unknown) {
+          if (!isENOENT(error)) throw error
+        }
+      }
+      try {
+        await unlinkat(dirfd, stagingDirName, { directory: true })
+      } catch (error: unknown) {
+        /* v8 ignore next -- the staging directory vanishes only if another process removed it. */
+        if (!isENOENT(error)) throw error
+      }
+    }
+  try {
+    await mkdirat(dirfd, stagingDirName, 0o700)
+    stagingCreated = true
+    stagingFd = await openat(dirfd, stagingDirName, DIRECTORY_OPEN_FLAGS)
+    await fchmodFd(stagingFd, 0o700)
+
+    tempFd = await openat(stagingFd, tempName, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
+    await fchmodFd(tempFd, 0o600)
+    await writeFileFd(tempFd, content, { encoding: 'utf8', ...signal ? { signal } : {} })
+    await fsyncFd(tempFd)
+    await internals.inspectTemp?.({ stagingDir, tempPath })
+    if (mode !== undefined) await fchmodFd(tempFd, mode)
+    await closeFd(tempFd)
+    tempFd = undefined
+
+    throwIfAborted(signal, 'write')
+    const targetName = basename(absolutePath)
+    if (createIfAbsent !== undefined) {
+      try {
+        if (internals.linkFile) await internals.linkFile(tempPath, absolutePath)
+        else await linkat(stagingFd, tempName, dirfd, targetName)
+      } catch (error: unknown) {
+        await throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
+      }
+    } else {
+      await renameat(stagingFd, tempName, dirfd, targetName)
+    }
+    try {
+      await removeStaging()
+    } catch (_committedStagingCleanupFailure) {
+      // The target is committed; owner-only staging residue cannot turn that write into a failure.
+    }
+  } catch (error: unknown) {
+    /* v8 ignore next -- abort-mid-write needs a writeFile/signal race; the non-abort side is tested. */
+    let failure: unknown = isAbortError(error) ? new FsError('write aborted', 'FS_ABORTED') : error
+    /* v8 ignore next 8 -- reached only if writeFile/fsync throws with the temp open (IO fault); close-failure is a double fault. */
+    if (tempFd !== undefined) {
+      try {
+        await closeFd(tempFd)
+      } catch (closeError: unknown) {
+        failure = new FsError(`write failed (${errorMessage(failure)}) and temp close failed (${errorMessage(closeError)})`, 'FS_NOT_FOUND', { cause: failure })
+      }
+    }
+    if (!stagingCreated) throw failure
+    return await removeStagingDirOrThrow(stagingDir, failure, removeStaging)
+  } finally {
+    if (stagingFd !== undefined) {
+      try {
+        await closeFd(stagingFd)
+      } catch (_closeFailure) {
+        /* v8 ignore next -- closing a held directory descriptor fails only on a kernel fault. */
+      }
+    }
+  }
+}
+
 /**
  * Atomically replace a file through a private, synced staging file in the same directory.
  * POSIX protects the staging directory and file with `0o700` and `0o600`. A new Windows file
  * inherits the destination directory's DACL; a replacement copies the existing target's DACL
  * onto the empty temp before writing and preserves the target descriptor at publication.
- * @param absolutePath - destination; missing parent directories are created.
+ * @param absolutePath - destination target key (realpath-derived); missing parent directories are
+ * created. Where `/proc/self/fd` exists, a parent directory (descriptor-relative publication) or a
+ * temp file (path-based publication) opened anywhere but at this spelling's parent fails the write
+ * with `FS_IO_ERROR`.
  * @param content - the full UTF-8 text to write.
  * @param mode - existing destination's POSIX mode to preserve, or `undefined` for a new file;
  * inert as a mode on Windows but identifies replacement security semantics.
@@ -603,6 +876,19 @@ export async function writeFileAtomic(
   const tempName = internals.tempName?.(absolutePath) ?? `${basename(absolutePath)}.tmp`
   const tempPath = join(stagingDir, tempName)
   const platform = internals.platform ?? process.platform
+  if (internals.descriptorPublication !== false && descriptorPublicationAvailable(platform)) {
+    const directoryHandle = await openVerifiedDirectory(directory, createIfAbsent?.displayPath ?? absolutePath)
+    if (directoryHandle !== undefined) {
+      try {
+        await writeFileAtomicAt(directoryHandle.fd, {
+          absolutePath, content, mode, signal, internals, createIfAbsent, stagingDirName, stagingDir, tempName, tempPath,
+        })
+        return
+      } finally {
+        await directoryHandle.close()
+      }
+    }
+  }
   const copyFileDacl = internals.copyFileDacl ?? copyFileDaclWin32
   const replaceFile = internals.replaceFile ?? replaceFileWin32
   const linkFile = internals.linkFile ?? link
@@ -618,6 +904,21 @@ export async function writeFileAtomic(
     await chmod(stagingDir, 0o700)
 
     handle = await open(tempPath, 'wx', 0o600)
+    const openedTemp = await openedPathOf(handle)
+    if (openedTemp !== undefined && openedTemp !== tempPath) {
+      // `directory` is the parent of the target key, so `tempPath` is canonical. A directory
+      // on it swapped for a symlink after resolution put the empty temp file elsewhere; remove
+      // it and its staging directory by the real path the descriptor reports.
+      await handle.close()
+      handle = undefined
+      await rm(openedTemp, { force: true })
+      try {
+        await rmdir(dirname(openedTemp))
+      } catch (_stagingResidue) {
+        // Non-recursive: an empty owner-only staging directory is the most this leaves behind.
+      }
+      throw pathChangedError('write', createIfAbsent?.displayPath ?? absolutePath)
+    }
     await handle.chmod(0o600)
     if (platform === 'win32' && mode !== undefined) {
       await copyFileDacl(absolutePath, tempPath)
@@ -630,6 +931,12 @@ export async function writeFileAtomic(
     handle = undefined
 
     throwIfAborted(signal, 'write')
+    // Path-based publication (no dirfd binding, no /proc, or not Linux). The temp file was created
+    // at its canonical path under the target's parent, and publication names the temp and the
+    // target through the same parent directory, so a parent swapped after the check above usually
+    // resolves the temp name to a directory that does not hold it and link/rename fails with
+    // ENOENT. The kernel still looks up the two parents separately inside one rename/link call, so
+    // a swap between those two lookups can publish elsewhere; `writeFileAtomicAt` closes that.
     if (createIfAbsent !== undefined) {
       try {
         await linkFile(tempPath, absolutePath)
@@ -717,7 +1024,7 @@ function countOccurrences(content: string, needle: string): number {
 /**
  * Read and decode a file for editing: rejects binaries, returns LF-normalized
  * content plus the original line-ending style for write-back.
- * @param absolutePath - the file to read (typically a target key).
+ * @param absolutePath - the target key (realpath) of the file to read.
  * @param displayPath - the caller-facing path used in error messages.
  * @param signal - aborts the read (`FS_ABORTED`).
  * @returns the LF-normalized content and the detected style to restore on write-back.
@@ -728,7 +1035,7 @@ export async function readForEdit(
   signal?: AbortSignal,
 ): Promise<{ content: string; lineEndings: LineEndings }> {
   throwIfAborted(signal, 'edit')
-  const buffer = await readFileAbortable(absolutePath, 'edit', signal)
+  const buffer = await readFileAbortable({ displayPath, targetKey: FsTargetKey(absolutePath) }, 'edit', signal)
   throwIfAborted(signal, 'edit')
   if (buffer.includes(0)) throw new FsError(`cannot edit "${displayPath}": binary file`, 'FS_NOT_TEXT')
   const raw = decodeUtf8(buffer, 'edit', displayPath)
@@ -741,11 +1048,11 @@ export async function readForEdit(
  * still succeeds and presentation falls back to a whole-file diff. The bound is enforced on
  * the opened descriptor rather than a prior path stat, so concurrent external replacement or
  * size changes cannot make this helper buffer more than `maxBytes`.
- * @param absolutePath - the file to read (typically a target key).
+ * @param absolutePath - the target key (realpath) of the file to read.
  * @param maxBytes - exclusive upper bound for bytes held as the contextual-diff basis.
  * @param signal - aborts the read (`FS_ABORTED`); cancellation propagates, unlike I/O failure.
  * @returns the LF-normalized text, or null for a non-regular, at/above-limit, binary, non-UTF-8,
- * descriptor-size-changed, or unreadable file.
+ * descriptor-size-changed, or unreadable file, or when the opened descriptor is not `absolutePath`.
  */
 export async function readTextForDiff(
   absolutePath: string,
@@ -754,11 +1061,13 @@ export async function readTextForDiff(
 ): Promise<string | null> {
   throwIfAborted(signal, 'read')
   try {
-    const handle = await open(absolutePath, 'r')
+    const handle = await open(absolutePath, READ_OPEN_FLAGS)
     let buffer: Buffer
     let total = 0
     let openedSize = 0
     try {
+      // A descriptor that reached another file than the target key yields no basis.
+      if (!await openedAt(handle, absolutePath)) return null
       throwIfAborted(signal, 'read')
       const info = await handle.stat()
       throwIfAborted(signal, 'read')

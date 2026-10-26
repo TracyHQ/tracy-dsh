@@ -4,7 +4,7 @@
  */
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import type { DockLabels, TabMenuExtras, TabRenderer } from '../contract/adapter.ts'
-import type { PaneId, SplitId, TabId } from '../contract/types.ts'
+import type { PaneId, SplitId, TabId, TabRecord } from '../contract/types.ts'
 import type { DropTarget } from '../engine/geometry.ts'
 
 /** Why a pane's split control is disabled: the pane budget, or too little width for two halves. */
@@ -27,6 +27,8 @@ export interface PaneCallbacks {
   readonly hideSplitWhenBlocked?: boolean
   /** Whether a pane's strip draws the add control. */
   readonly canAddTab: (paneId: PaneId) => boolean
+  readonly renderAddTab?: ((paneId: PaneId, active: boolean) => ReactNode) | undefined
+  readonly isTabVisible?: ((tab: TabRecord) => boolean) | undefined
   /** Whether a tab draws its close control and its menu's close item. */
   readonly canCloseTab: (tabId: TabId) => boolean
   /** Live drop preview, or `undefined` while nothing is being dragged. */

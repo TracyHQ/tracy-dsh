@@ -45,7 +45,7 @@ kind: "package-reference"
 
 在 Windows Electron 中，`html[data-windows-titlebar]` 让全屏面板保持在顶栏下方及展开侧栏的右侧。框架的 `--dsh-windows-sidebar-width` 提供该缩进及最大宽度；`--dsh-windows-content-radius` 提供左上圆角。仅全屏面板为该圆角裁剪溢出内容。
 
-席位通过 `ctx.layout.openRightbar(track, fullscreen)` / `closeRightbar()` 报告呈现，框架不注入本包。宽屏切换全屏不改变中栏宽度；宽度拖拽区只在普通展开态显示。独立浮窗及 `float`/`dock` 操作保持可用。
+席位通过 `ctx.layout.openRightbar(track, fullscreen, preferred?, max?)` / `closeRightbar()` 报告呈现，其中 `preferred` 为当前活动标签页类型的 `preferredWidth`，`max` 为其 `maxWidth`（Tracy）；框架不注入本包。宽屏切换全屏不改变中栏宽度；宽度拖拽区只在普通展开态显示。独立浮窗及 `float`/`dock` 操作保持可用。
 
 面板没有标题行。它的两个控件——形态切换与折叠按钮——搭在套件 chrome 席位上，位于右上格 tab 条的最末端，因此 tab 条就是面板的整条上边。每条 tab 条从左到右读作：在允许时带关闭按钮的 tab 胶囊，添加控件（只在该格没有引导 tab 时绘制；它通过 `ctx.sidebarRight.openTab` 在该格打开引导页），该格的分栏控件，以及右上格里的两个面板控件。窄格里只有 chip 让位；其后的控件从不收缩或被裁切。
 
@@ -100,6 +100,14 @@ tab 类型分两阶段注册，随包发布的引导类型走的正是别的包�
 
 <a id="the-tab-domain"></a>
 ## Tab 域
+
+### 产品启动器
+
+`ctx.sidebarRight.registerLauncher({ kinds, label, emptyLabel })` 用一个 `+` 菜单和给定的空态文案替换引导页的 chip 与正文。返回的 disposer 恢复普通的引导页呈现；同一时间只能注册一个产品启动器。`launcher` 以可观察快照暴露当前注册。文案可以是由 locale 服务支撑的 getter。
+
+菜单按 `kinds` 的顺序排列，只收录当前有引导页条目的 kind。它不会注销其他 kind，也不改变权限检查：调用方仍可通过普通导航 API 打开未列出的页面。选中一项会替换该 pane 现有的引导页。菜单只在用户按下 `+` 时打开，绝不自行弹出：加载时不弹，pane 持有引导页时不弹，关闭最后一个内容页后 pane 仍展开且为空时也不弹——那个 pane 显示 `emptyLabel`。后台保留的 tab host 从不发布启动器弹层。弹层位置按菜单的实测尺寸计算，首选边放不下时绕触发器翻转。
+
+### 生命周期
 
 Tab 域按（Session，Tab id）保留品牌化 occurrence id、导航、中止信号与绑定动作。私有装配回调采用各 Session 的 store，立即对齐恢复的记录，再跟随其提交。同一 Session 的 store 重建会替换其 `adopt` 注册，同时释放旧订阅与清理引用。记录消失或插件卸载才中止 signal，收起和切会话不销毁记录；undo 恢复的是新 occurrence。`useTabInfo()` 组合框架绑定的 store 与导航 hook，不在组件中手写订阅或在渲染时创建记录。`tab.actions` 始终作用于自己的会话；`tab.visible` 区分正文与标题，并排除后台 Session；前台浮窗不受整栏收起影响。`adopt` 不在公开控制器上。
 

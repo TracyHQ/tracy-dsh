@@ -11,8 +11,8 @@ import { chatNode } from './common.ts'
 
 declare module '../contract/chat-nodes.ts' {
   interface ChatNodeDataMap {
-    /** Ordinary slash-command lifecycle. */
-    command: CommandNode
+    /** Ordinary slash-command lifecycle (`CommandChatData`: plus where its settled row branches, Tracy tracy.42). */
+    command: CommandNode & { readonly settledSeq?: number }
     /** Manual compact command combined with its compaction transaction. */
     'manual-compaction': ManualCompactionChatData
   }
@@ -170,6 +170,17 @@ export function updateCompactionState<State extends CompactionEvidence>(
   return state
 }
 
+/**
+ * The newest durable seq among a lifecycle's matched events.
+ * @param matches - the Context's matches.
+ * @returns the greatest seq, or undefined when none is loaded.
+ */
+function newestSeq(matches: readonly ConversationMatch[]): number | undefined {
+  let newest: number | undefined
+  for (const match of matches) newest = newest === undefined ? match.event.seq : Math.max(newest, match.event.seq)
+  return newest
+}
+
 /** Slash-command lifecycle, including integrated manual compaction, Definition. */
 export const commandDefinition: ConversationNodeDefinition<CommandState> = {
   kind: 'command',
@@ -204,13 +215,20 @@ export const commandDefinition: ConversationNodeDefinition<CommandState> = {
   buildViewNode: (context) => {
     const state = context.state ?? fallbackState(context)
     if (state === undefined) return null
+    // Tracy (tracy.42): a settled command's row branches after its whole lifecycle.
+    const settledSeq = state.command.outcome === null ? undefined : newestSeq(context.matches)
     if (state.command.name !== 'compact') {
-      return chatNode(context, 'command', state.command.seq, state.command)
+      return chatNode(context, 'command', state.command.seq,
+        settledSeq === undefined ? state.command : { ...state.command, settledSeq })
     }
     const compaction = state.checkpoint === undefined
       ? null
       : compactSummary(state.summary, state.checkpoint)
-    const data: ManualCompactionChatData = { command: state.command, compaction }
+    const data: ManualCompactionChatData = {
+      command: state.command,
+      compaction,
+      ...settledSeq === undefined ? {} : { settledSeq },
+    }
     return chatNode(context, 'manual-compaction', compaction?.seq ?? state.command.seq, data)
   },
 }

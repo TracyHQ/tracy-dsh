@@ -17,7 +17,7 @@ import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { LayoutController } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { RowToast } from '../src/client/contract/slots.ts'
-import { DirectoryBrowseError, UiWorkspaceService } from '../src/client/navigation.ts'
+import { ATTACH_ECHO_WAIT_MS, DirectoryBrowseError, UiWorkspaceService } from '../src/client/navigation.ts'
 import { createWorkspaceViewStore, FLAT_SESSION_ORDER_KEY } from '../src/client/stores.ts'
 import { UNGROUPED_KEY } from '../src/client/tree.ts'
 
@@ -272,13 +272,18 @@ interface BenchOptions {
   readonly configureSessions?: (sessions: FakeSessions) => void
 }
 
+/** Let queued microtasks and a macrotask turn settle. */
+async function flush(): Promise<void> {
+  await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+}
+
 function bench(options: BenchOptions = {}) {
   const ctx = new Context()
   contexts.push(ctx)
   const layout = new LayoutController({
     selectPanel: vi.fn(), retainMainPanels: vi.fn(),
     setSidebar: vi.fn(), toggleSidebar: vi.fn(), setViewportWidth: vi.fn(),
-    setRightbar: vi.fn(), openRightbar: vi.fn(), closeRightbar: vi.fn(),
+    setChat: vi.fn(), resetChat: vi.fn(), openRightbar: vi.fn(), closeRightbar: vi.fn(),
   }, () => true, createSnapshotStore({ activePanelId: null }))
   const selectPanel = vi.spyOn(layout, 'selectPanel')
   ctx.provide('layout', layout)
@@ -286,6 +291,22 @@ function bench(options: BenchOptions = {}) {
   const directoryPicker = new FakeDirectoryPicker()
   const workspaces = new FakeWorkspaces(options.workspaces ?? workspaceState([], [], 'pending'))
   const sessions = new FakeSessions(options.sessions ?? sessionState([], 'pending'))
+  // Tracy: `openWorkspace` waits for the Workspace to account for a created Session
+  // (`whenAccounted`), so creation echoes membership at once here, as the Host's follow stream
+  // does. A test about the wait itself overrides `create` with a mock that does not.
+  sessions.create.mockImplementation(async (options) => {
+    const created = options?.sessionId ?? sid(`created-${String(options?.workspaceId ?? 'none')}`)
+    const workspaceId = options?.workspaceId
+    if (workspaceId !== undefined) {
+      workspaces.list.update(state => ({
+        ...state,
+        items: state.items.map(item => item.workspaceId === workspaceId
+          ? { ...item, sessionIds: [...item.sessionIds, created] }
+          : item),
+      }))
+    }
+    return created
+  })
   options.configureWorkspaces?.(workspaces)
   options.configureSessions?.(sessions)
   const view = createWorkspaceViewStore().create()
@@ -728,6 +749,50 @@ describe('UiWorkspaceService', () => {
     await vi.waitFor(() => {
       expect(missingMember.sessions.create).toHaveBeenCalledWith({ workspaceId: wid('newer') })
     })
+  })
+
+  it('opens a New Session only once its Workspace accounts for it, so it never shows under Ungrouped', async () => {
+    // A saved selection, so startup restores `open` instead of creating a session of its own.
+    persistSelection({ sessionId: sid('open') })
+    const b = bench({
+      sessions: sessionState([summary('open', { cwd: '/w/home' })]),
+      workspaces: workspaceState([workspace('home', [sid('open')])]),
+    })
+    b.sessions.create.mockResolvedValue(sid('fresh'))
+    const listeners = b.workspaces.list.listenersSnapshot().length
+
+    b.uiWorkspace.startSession(wid('home'))
+    await flush()
+    await flush()
+    expect(b.sessions.retain).not.toHaveBeenCalledWith(sid('fresh'), { source: 'mainView' })
+
+    b.workspaces.list.set(workspaceState([workspace('home', [sid('open'), sid('fresh')])]))
+    await vi.waitFor(() => {
+      expect(b.sessions.retain).toHaveBeenCalledWith(sid('fresh'), { source: 'mainView' })
+    })
+    expect(b.workspaces.list.listenersSnapshot()).toHaveLength(listeners)
+  })
+
+  it('opens a New Session anyway when the membership echo never arrives', async () => {
+    vi.useFakeTimers()
+    try {
+      persistSelection({ sessionId: sid('open') })
+      const b = bench({
+        sessions: sessionState([summary('open', { cwd: '/w/home' })]),
+        workspaces: workspaceState([workspace('home', [sid('open')])]),
+      })
+      b.sessions.create.mockResolvedValue(sid('fresh'))
+      const listeners = b.workspaces.list.listenersSnapshot().length
+
+      b.uiWorkspace.startSession(wid('home'))
+      await vi.advanceTimersByTimeAsync(ATTACH_ECHO_WAIT_MS - 1)
+      expect(b.sessions.retain).not.toHaveBeenCalledWith(sid('fresh'), { source: 'mainView' })
+      await vi.advanceTimersByTimeAsync(1)
+      expect(b.sessions.retain).toHaveBeenCalledWith(sid('fresh'), { source: 'mainView' })
+      expect(b.workspaces.list.listenersSnapshot()).toHaveLength(listeners)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('opens nothing when a New Session request has no Workspace to open', () => {

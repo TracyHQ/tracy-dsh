@@ -5,7 +5,7 @@
  * errno; JavaScript owns the promise and syscall error construction.
  */
 
-#include <node_api.h>
+#include "system.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -153,12 +153,10 @@ static napi_value try_lock(napi_env env, napi_callback_info info) {
   return NULL;
 }
 
-NAPI_MODULE_INIT() {
+napi_status flock_register(napi_env env, napi_value exports) {
   napi_value function;
-  if (napi_create_function(env, "tryLock", NAPI_AUTO_LENGTH, try_lock,
-                           NULL, &function) != napi_ok ||
-      napi_set_named_property(env, exports, "tryLock", function) != napi_ok) {
-    return NULL;
-  }
-  return exports;
+  napi_status status = napi_create_function(env, "tryLock", NAPI_AUTO_LENGTH, try_lock,
+                                            NULL, &function);
+  if (status != napi_ok) return status;
+  return napi_set_named_property(env, exports, "tryLock", function);
 }

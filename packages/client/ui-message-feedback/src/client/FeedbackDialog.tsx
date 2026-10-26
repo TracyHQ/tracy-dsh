@@ -21,12 +21,10 @@ import css from './FeedbackDialog.module.css'
  * `FeedbackCategory` union: a missing or foreign id is a compile error.
  */
 const CATEGORY_CHIPS = {
-  'task-result': true,
-  'instruction-following': true,
-  'product-interaction': true,
-  'service-stability': true,
-  'resource-cost': true,
-  'security-privacy-permission': true,
+  'general': true,
+  'product-feature': true,
+  'desktop-app': true,
+  'web-app': true,
   'other': true,
 } satisfies Record<FeedbackCategory, true>
 const CATEGORIES = Object.keys(CATEGORY_CHIPS) as FeedbackCategory[]
@@ -105,10 +103,15 @@ export function FeedbackDialog({
             <button
               key={category}
               type="button"
-              className={state.category === category ? `${css.chip} ${css.chipActive}` : css.chip}
-              aria-pressed={state.category === category}
+              className={state.categories.includes(category) ? `${css.chip} ${css.chipActive}` : css.chip}
+              aria-pressed={state.categories.includes(category)}
               disabled={state.submitting}
-              onClick={() => { edit({ category: state.category === category ? null : category }) }}
+              onClick={() => {
+                const categories = state.categories.includes(category)
+                  ? state.categories.filter(selected => selected !== category)
+                  : [...state.categories, category]
+                edit({ categories })
+              }}
             >
               {t(`category.${category}`)}
             </button>

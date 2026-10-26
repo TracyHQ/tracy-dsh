@@ -11,6 +11,9 @@ export const THEME_SETTINGS_NAMESPACE = 'ui-theme'
 /** Field carrying the selected built-in theme preference. */
 export const THEME_PREFERENCE_FIELD = 'preference'
 
+/** localStorage key holding a remote (memory-mode) browser's theme section. */
+export const THEME_LOCAL_STORAGE_KEY = 'dsh.ui-theme.v1'
+
 /** Field carrying the conversation content font size. */
 export const FONT_SIZE_FIELD = 'fontSize'
 

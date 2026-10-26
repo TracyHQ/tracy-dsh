@@ -107,6 +107,17 @@ export interface SidebarRightTabDefinition {
   /** Lazily keep a visited body mounted through hiding, Session changes and docking; default false. */
   readonly keepMounted?: boolean
   /**
+   * Tracy: whether a surface's LAST tab of this kind refuses an explicit close.
+   *
+   * Read at every close decision (`canCloseTab`), so the answer may follow the
+   * page — a type that is the workspace's own page keeps it only where there is
+   * one. While it answers `true`, the one remaining tab of the kind draws no
+   * close route and refuses the programmatic path; a second tab of the kind
+   * still closes, and collapsing the column stays allowed. Omit to close freely.
+   * @returns whether the last tab of this kind stays.
+   */
+  readonly keepLast?: () => boolean
+  /**
    * Resource-address globs this type recognizes; omit for a page type, which is
    * opened by kind and recognizes no address.
    *
@@ -136,6 +147,21 @@ export interface SidebarRightTabDefinition {
   readonly title: (address: string) => string
   /** Entry boxes for the guide page. Omit to stay off it. */
   readonly guide?: readonly SidebarRightGuideEntry[]
+  /**
+   * The panel width in px this type's tabs read best at. While one of them is
+   * the active tab, the frame opens the panel at this width until the user
+   * drags the divider. Omit for the frame default.
+   */
+  readonly preferredWidth?: number
+  /**
+   * Tracy: the widest the panel may be, in px, while one of this type's tabs is
+   * the active tab on a frame wide enough for a normal panel. A divider drag
+   * cannot widen the panel past it, a wider panel shrinks to it without losing
+   * the width the user chose for other tabs, and the fullscreen presentation is
+   * not offered (a recorded fullscreen mode is drawn as a normal panel and
+   * comes back on a tab without this field). Omit for no ceiling.
+   */
+  readonly maxWidth?: number
 }
 
 /** What a routing decision settles on: who draws the address, and as what. */

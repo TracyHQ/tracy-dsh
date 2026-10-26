@@ -5,7 +5,7 @@
  */
 
 import { brandString } from '@deepseek-ai/dsh-brand'
-import { contentHasImage, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, offloadedImageText, projectOffloadedImages, requestImageHandleText, requiredImageOffload } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, offloadedImageText, projectOffloadedImages, readRequestImages, requestImageHandleText, requiredImageOffload } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, ImageAttachmentAccessResolver, Message, RequestMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {
   AttachmentId,
@@ -94,36 +94,6 @@ function userContent(
   }
   if (content.every(block => block.type === 'text')) return content.map(block => block.text).join('')
   return content
-}
-
-function collectImageRefs(
-  blocks: readonly ContentBlock[],
-  refs: Map<AttachmentId, ImageAttachmentRef>,
-): void {
-  for (const block of blocks) {
-    if (block.type === 'image') {
-      if (block.offloaded !== true) refs.set(block.attachment.attachmentId, block.attachment)
-    }
-  }
-}
-
-async function prepareRequestImages(
-  messages: readonly RequestMessage[],
-  attachments: AttachmentStore,
-  budget: PiImageRequestBudget,
-  signal?: AbortSignal,
-): Promise<Map<AttachmentId, RequestImageAttachment>> {
-  const refs = new Map<AttachmentId, ImageAttachmentRef>()
-  for (const message of messages) collectImageRefs(message.content, refs)
-  const orderedRefs = [...refs.values()]
-  const prepared = await Promise.all(orderedRefs.map(
-    ref => attachments.readImageRequest(ref, requestImageTarget(ref, budget), signal),
-  ))
-  const versions = new Map<AttachmentId, RequestImageAttachment>()
-  for (const [index, ref] of orderedRefs.entries()) {
-    versions.set(ref.attachmentId, prepared[index] as RequestImageAttachment)
-  }
-  return versions
 }
 
 function toolsOf(options: GenerateOptions): PiTool[] | undefined {
@@ -303,10 +273,13 @@ async function toPiContextWithImages(
   }
   assertSupportedHistory(options.messages)
   const split = splitSystemPrompt(options)
-  const requestImages = await prepareRequestImages(split.messages, attachments, requestImagePolicy, options.signal)
+  const { messages: retained, versions: requestImages } = await readRequestImages(
+    split.messages,
+    ref => attachments.readImageRequest(ref, requestImageTarget(ref, requestImagePolicy), options.signal),
+  )
   if (maxRequestImageBytes !== undefined) {
     const offloadImages = requiredImageOffload(
-      split.messages,
+      retained,
       { representation: 'base64', maxBytes: maxRequestImageBytes },
       block => (requestImages.get(block.attachment.attachmentId) as RequestImageAttachment).bytes,
     )
@@ -319,7 +292,7 @@ async function toPiContextWithImages(
     }
   }
   const exactMessages = projectOffloadedImages(
-    split.messages,
+    retained,
     ref => offloadedImageText(ref, resolveImageAccess(ref)),
   )
   const toolNames = new Map<ToolCallId, string>()

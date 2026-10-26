@@ -60,6 +60,36 @@
   }
 }
 
+/* Tracy (tracy.42): ONE row stays out, under the LAST finished answer of any
+   kind (an agent turn tail, a settled slash command, a plugin's client-local
+   answer such as Tracy's /help), until the person sends a new request. Every
+   row claiming the always seat (`data-actions-reveal='always'`) goes back to the
+   hover reveal once a later request or answer follows its flow item: a user or
+   steering message, a command, a later turn's tail, a pending submission, or a
+   flow item marked `data-chat-exchange` (a plugin's local question or answer,
+   `ChatLocalNodeInput.exchange`). The later item is matched by its own
+   attributes: `:has()` cannot nest inside the `:has(~ …)`. What the composer
+   holds does not matter. Hovering or focusing the answer's flow item
+   brings the row back, as for earlier turns. */
+@media (hover: hover) {
+  :is([data-chat-flow-kind], [data-chat-flow-key]):has(~ :is(
+    [data-chat-flow-kind='user'], [data-chat-flow-kind='steering'], [data-chat-flow-kind='command'],
+    [data-chat-flow-kind='manual-compaction'], [data-chat-flow-kind='turn-tail'], [data-submission-echo],
+    [data-pending-steering], [data-chat-exchange]
+  )) [data-actions-reveal='always'] .actions {
+    opacity: 0;
+    transition: opacity 80ms ease;
+  }
+
+  :is([data-chat-flow-kind], [data-chat-flow-key]):has(~ :is(
+    [data-chat-flow-kind='user'], [data-chat-flow-kind='steering'], [data-chat-flow-kind='command'],
+    [data-chat-flow-kind='manual-compaction'], [data-chat-flow-kind='turn-tail'], [data-submission-echo],
+    [data-pending-steering], [data-chat-exchange]
+  )):is(:hover, :focus-within) [data-actions-reveal='always'] .actions {
+    opacity: 1;
+  }
+}
+
 .action {
   display: inline-flex;
   align-items: center;

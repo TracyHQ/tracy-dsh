@@ -1,13 +1,15 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
+import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import {
   IconCheckOutlineRegular, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular,
   FileTypeIcon, fileSizeText, IconEditOutlineRegular, IconQueueOutlineRegular, IconSendOutlineRegular,
-  IconTrashOutlineRegular, projectUserText, Tooltip,
+  IconTrashOutlineRegular, projectUserText, Tooltip, userTextFoldRanges,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { UserTextFold } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import type { QueueAction } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
@@ -17,13 +19,39 @@ import css from './QueueDock.module.css'
 const EMPTY_QUEUE = [] as const
 const QUEUE_PREVIEW_CHARS = 200
 
-function previewOf(content: InboxState['next-turn'][number]['content']): string {
-  const flat = content
+/**
+ * One queued row's single-line preview text. A span a registered fold claims
+ * is kept verbatim, so the projection draws the same chip here as in the
+ * transcript; only the words around it are flattened and shortened.
+ * @param content - the row's wire content blocks.
+ * @param folds - registered fenced-block folds.
+ * @returns the preview text handed to `projectUserText`.
+ */
+function previewOf(content: InboxState['next-turn'][number]['content'], folds: readonly UserTextFold[]): string {
+  const joined = content
     .filter(block => block.type !== 'image' && block.type !== 'file')
     .map(block => (block.type === 'text' ? block.text : `[${block.type}]`))
-    .join(' ').replace(/\s+/g, ' ').trim()
-  const chars = Array.from(flat)
-  return chars.length > QUEUE_PREVIEW_CHARS ? `${chars.slice(0, QUEUE_PREVIEW_CHARS).join('')}…` : flat
+    .join(' ')
+  let budget = QUEUE_PREVIEW_CHARS
+  let cut = false
+  const shorten = (text: string): string => {
+    const chars = Array.from(text.replace(/\s+/g, ' ').trim())
+    if (cut || chars.length === 0) return ''
+    if (chars.length <= budget) {
+      budget -= chars.length
+      return chars.join('')
+    }
+    cut = true
+    return `${chars.slice(0, budget).join('')}…`
+  }
+  let preview = ''
+  let cursor = 0
+  for (const range of userTextFoldRanges(joined, folds)) {
+    preview += shorten(joined.slice(cursor, range.start)) + joined.slice(range.start, range.end)
+    cursor = range.end
+  }
+  const rest = shorten(joined.slice(cursor))
+  return preview + (preview !== '' && rest !== '' ? ' ' : '') + rest
 }
 
 function textOf(content: InboxState['next-turn'][number]['content']): string | null {
@@ -37,6 +65,10 @@ export interface QueueDockInjected {
   notify: (level: 'info' | 'error', text: string) => void
   /** Resolve one durable queued image into a session-scoped browser URL. */
   loadImage: (attachment: ImageAttachmentRef) => Promise<string>
+  hooks: {
+    /** Registered fenced-block folds (`uiConversation.userTextFolds`), applied to every row. */
+    textFolds: ObservableSnapshot<readonly UserTextFold[]>
+  }
 }
 
 /**
@@ -146,14 +178,15 @@ function QueueEditor({ text, label, onChange, onSave, onCancel }: {
 }
 
 /** Full props of a dock entry: InputZone owner share + session standard kit + global seat + the locale seat. */
-export type QueueDockProps = PropsRuntime<'conversation.input.dock'> & QueueDockInjected & PropsLocale<'conversation'>
+export type QueueDockProps = PropsRuntime<'conversation.input.dock'> & InjectFace<QueueDockInjected> & PropsLocale<'conversation'>
 
 /**
  * Queue strip: one item renders directly; multiple items default to a
  * collapsible count header; an empty queue renders nothing. Local queued submissions
  * show sending status and disabled actions until their Host queue rows arrive.
  */
-export function QueueDock({ useSession, useProjection, updateQueue, notify, loadImage, t }: QueueDockProps) {
+export function QueueDock({ useSession, useProjection, useTextFolds, updateQueue, notify, loadImage, t }: QueueDockProps) {
+  const folds = useTextFolds(list => list)
   const inbox = useProjection('inbox') as unknown as InboxState | undefined
   const pendingSubmissions = useSession(s => s.pendingSubmissions)
   const queue = useMemo(() => {
@@ -278,7 +311,7 @@ export function QueueDock({ useSession, useProjection, updateQueue, notify, load
                             ))}
                         </span>
                       )}
-                      <span className={css.preview}>{projectUserText(previewOf(row.content), [])}</span>
+                      <span className={css.preview}>{projectUserText(previewOf(row.content, folds), [], [], 'skill', undefined, folds)}</span>
                     </>
                   )}
                 {queueMutable && <div className={css.actions}>
@@ -392,7 +425,7 @@ export function QueueDock({ useSession, useProjection, updateQueue, notify, load
                       ))}
                   </span>
                 )}
-                <span className={css.preview}>{projectUserText(submission.text, [])}</span>
+                <span className={css.preview}>{projectUserText(submission.text, [], [], 'skill', undefined, folds)}</span>
                 <span className={css.status} role="status">{t('queue.sending')}</span>
                 {queueMutable && <div className={css.actions}>
                   <button
@@ -451,6 +484,7 @@ export const queueDockEntry = {
           updateQueue: (itemId, action) => conversation.updateQueue(itemId, action),
           notify: (level, text) => { conversation.input.for(actx).notify(level, text) },
           loadImage: attachment => ctx.uiConversation.imageUrl(sessionId, attachment),
+          hooks: { textFolds: ctx.uiConversation.userTextFolds.source },
         }
       },
     }, QueueDock))

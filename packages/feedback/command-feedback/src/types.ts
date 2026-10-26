@@ -11,6 +11,14 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
 /** One of the fixed feedback categories; the ids are durable log vocabulary. */
 export type FeedbackCategory =
+  | 'general'
+  | 'product-feature'
+  | 'desktop-app'
+  | 'web-app'
+  | 'other'
+
+/** Legacy single categories retained when reading previously recorded session events. */
+export type LegacyFeedbackCategory =
   | 'task-result'
   | 'instruction-following'
   | 'product-interaction'
@@ -27,8 +35,10 @@ export type FeedbackCategory =
 export interface FeedbackRecord {
   /** Free-text remark with surrounding whitespace removed; never empty when present. */
   readonly text?: string
-  /** Category the human filed the remark under. */
-  readonly category?: FeedbackCategory
+  /** Categories selected for the remark. */
+  readonly categories?: readonly FeedbackCategory[]
+  /** Legacy single category retained for old session events. */
+  readonly category?: LegacyFeedbackCategory
 }
 
 declare module '@deepseek-ai/dsh-session/types' {
@@ -47,8 +57,7 @@ export interface SessionFeedbackRecordRequest {
   readonly sessionId: SessionId
   /** Free-text remark; blank text is recorded as absent. */
   readonly text?: string
-  /** Category the human filed the remark under. */
-  readonly category?: FeedbackCategory
+  readonly categories?: readonly FeedbackCategory[]
 }
 
 /** Stable postcondition of a recorded remark. */

@@ -223,11 +223,13 @@ export interface HostConnectionHandle {
 
   /**
    * Authenticate one frontend index request, owning a token redirect or 401.
-   * @param request - root or configured-index HTTP request.
+   * @param request - root or configured-index HTTP request, its URL already stripped of any mount prefix.
    * @param response - response owned when the result is false.
+   * @param mount - the mount prefix the page is served under ('' at the root): the session
+   * cookie is scoped to it and the clean redirect after a token exchange returns to it.
    * @returns true only when the frontend may serve index.html.
    */
-  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean
+  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, mount?: string): boolean
 
   /**
    * Add the fresh process token to an ordinary Web application URL.

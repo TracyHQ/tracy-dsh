@@ -71,7 +71,7 @@ This section explains the design decisions behind the local backend and points a
 The backend builds on three ideas:
 
 - **Realpath identity.** The `targetKey` is the file's `realpath`, so two input paths reaching the same file through symlinks share one identity, and writes land on the link target while preserving the link.
-- **Atomic publication.** Writes stage into an exclusive temp file inside a private staging directory next to the target, fsync, then publish; an existing file's mode is preserved and Windows DACLs survive replacement.
+- **Atomic publication.** Writes stage into an exclusive temp file inside a private staging directory next to the target, fsync, then publish; an existing file's mode is preserved and Windows DACLs survive replacement. On Linux with the native `@deepseek-ai/node-addon-system/dirfd` calls, the write opens the target's parent, requires `/proc/self/fd` to name it, and creates, publishes, and cleans up relative to that descriptor, so a parent swapped for a symlink cannot place the file elsewhere; other hosts publish by path.
 - **One mutation critical section.** A per-target FIFO lock serializes read→guard→write windows, so concurrent writes and edits are deterministically ordered — one wins, the rest see the new version and reject as stale.
 
 ### Source map

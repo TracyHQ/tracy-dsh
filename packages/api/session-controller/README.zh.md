@@ -68,6 +68,8 @@ Client 的首次 `follow`、重连首屏与 `loadOlder()` 至少请求 50 条以
 
 本控制器通过 `ctx.plugin` 组合 `ArchivedSessionGate`：在 Agent 注册表、Session store 与 Workspace 注册表就绪后加载，随控制器一起释放。它的 `agent/pre-step` 监听器会拒绝为已归档会话或其子代理子孙——从 Session header 的血缘字段读出，从不包括 fork——提出的步骤，因此迟到的唤醒投递会让该回合以 `blocked` 收口而不发出模型请求；取消归档即为整条血缘解除门禁。已归档会话仍在跑的工作由各自的 owner 通过 Workspace 注册表的归档准入（[接缝](../../workspace/workspace/README.zh.md)）报告与停止：运行中的回合由 [Agent 注册表](../../core/agent/README.zh.md)负责，所属任务由[任务注册表接缝](../../jobs/jobs/README.zh.md)负责，子代理子孙由 [Subagent](../../subagent/subagent/README.zh.md) runtime 负责，提醒由 [Schedule](../../schedule/schedule/README.zh.md) 插件负责；本控制器自己不报告任何内容。
 
+Host 插件可通过 `api-session/prompt-hold` bail 事件暂缓普通追加消息，例如在部署等待运行中的工作结束时。被暂缓的追加消息进入持久化的下一轮队列但不唤醒 Agent，因此 QueueDock 会显示它，编辑和移除与其他排队项相同。当没有监听器继续暂缓时，`sessionController.releaseHeldPrompts(sessionId)` 唤醒空闲的 Agent：它按原顺序重新排入待处理的追加消息并唤醒驱动器，每条消息作为独立的一轮只运行一次。引导消息从不被暂缓；运行中的 Agent 在当前轮次结束时仍会认领被暂缓的追加消息。被暂缓的追加消息在重启后仍作为排队项保留；何时释放由暂缓方决定。
+
 <a id="client-references"></a>
 ## Client 引用
 

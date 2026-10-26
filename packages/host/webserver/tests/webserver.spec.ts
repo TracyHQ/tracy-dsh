@@ -355,6 +355,78 @@ describe('real Loader composition', () => {
       + '<script>(globalThis.__DSH_BOOT_READY__ ??= Promise.withResolvers()).resolve()</script>')
   })
 
+  it('mounts under the prefix a loopback proxy names in x-forwarded-prefix', { timeout: 60_000 }, async () => {
+    // A reverse proxy in front of dsh may publish it under a path (`https://host/<site>/`) while
+    // dsh itself keeps every route at the root. The proxy says which prefix it stripped nothing
+    // from — the request arrives with the prefix still on it — and the server takes it off
+    // before matching, so route owners never see it. `mountOf(req)` is for the few handlers that
+    // build absolute URLs (the `<base>` tag, cookie paths, redirects) and must put it back.
+    const loaded = await loadComposition()
+    const server = loaded.webServer
+    const seen: { url: string | undefined; mount: string }[] = []
+    server.register({
+      kind: 'prefix',
+      path: '/api',
+      handler: (req, res) => {
+        seen.push({ url: req.url, mount: server.mountOf(req) })
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('api')
+      },
+    })
+    server.registerFallback((req, res) => {
+      res.writeHead(404, { 'content-type': 'text/plain' })
+      res.end(`fallback ${String(req.url)} ${server.mountOf(req)}`)
+    })
+    server.registerUpgrade({
+      path: '/ws',
+      handler: (req, socket) => {
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\nX-Mount: ${server.mountOf(req)}\r\n\r\n`)
+        socket.end()
+      },
+    })
+    const port = server.port
+    const mounted = { headers: { 'x-forwarded-prefix': '/site.example' } }
+
+    // The prefixed path reaches the root route; the handler sees the stripped url and the mount.
+    const api = await request(port, '/site.example/api/ping?x=1', mounted)
+    expect(api.status).toBe(200)
+    expect(seen).toEqual([{ url: '/api/ping?x=1', mount: '/site.example' }])
+
+    // The prefix alone is the root; a path outside the prefix is served as-is, with no mount.
+    const rootUnderPrefix = await request(port, '/site.example', mounted)
+    expect(rootUnderPrefix.body).toBe('fallback / /site.example')
+    const outside = await request(port, '/elsewhere/api/ping', mounted)
+    expect(outside.body).toBe('fallback /elsewhere/api/ping ')
+
+    // Without the header nothing changes: the same path is a miss, as it always was.
+    const bare = await request(port, '/site.example/api/ping')
+    expect(bare.body).toBe('fallback /site.example/api/ping ')
+
+    // A value that is not a clean absolute path is ignored, not applied halfway.
+    for (const bad of ['site.example', '/site.example/', '/a/../b', '/a b', 'https://x/y', '/']) {
+      const got = await request(port, '/site.example/api/ping', { headers: { 'x-forwarded-prefix': bad } })
+      expect(got.body, bad).toBe('fallback /site.example/api/ping ')
+    }
+
+    // Upgrades are mounted the same way.
+    const socket = connect(port, '127.0.0.1')
+    await once(socket, 'connect')
+    const answer = once(socket, 'data')
+    socket.write([
+      'GET /site.example/ws HTTP/1.1',
+      `Host: 127.0.0.1:${String(port)}`,
+      'X-Forwarded-Prefix: /site.example',
+      'Connection: Upgrade',
+      'Upgrade: dsh-test',
+      '',
+      '',
+    ].join('\r\n'))
+    const [data] = await answer as [Buffer]
+    expect(String(data)).toContain('101 Switching Protocols')
+    expect(String(data)).toContain('X-Mount: /site.example')
+    socket.destroy()
+  })
+
   it('fails the fiber when the port is already taken (fail-loud at activation)', { timeout: 60_000 }, async () => {
     const first = await loadComposition()
     const takenPort = first.webServer.port

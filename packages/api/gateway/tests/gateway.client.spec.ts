@@ -1567,7 +1567,7 @@ describe('Client Typert API', () => {
     await client.dispose()
   })
 
-  it('delegates immediately when the Agent adapter or Context is unavailable', async () => {
+  it('delegates immediately when the Agent adapter is unavailable, or the Context has no listener', async () => {
     const { ctx, client, carrier, call } = await eventBench()
     carrier.emit(approvalFrame('event-no-adapter', 'agent-late', 'no adapter'))
     await vi.waitFor(() => { expect(call).toHaveBeenCalledTimes(1) })
@@ -1578,12 +1578,11 @@ describe('Client Typert API', () => {
       identity: candidate => candidate === target ? agentId('agent-found') : undefined,
       resolve,
     })
-    carrier.emit(approvalFrame('event-missing-context', 'agent-missing', 'missing'))
     carrier.emit(approvalFrame('event-no-listener', 'agent-found', 'delegate'))
 
-    await vi.waitFor(() => { expect(call).toHaveBeenCalledTimes(3) })
-    expect(resolve).toHaveBeenCalledTimes(2)
-    for (const eventId of ['event-no-adapter', 'event-missing-context', 'event-no-listener']) {
+    await vi.waitFor(() => { expect(call).toHaveBeenCalledTimes(2) })
+    expect(resolve).toHaveBeenCalledTimes(1)
+    for (const eventId of ['event-no-adapter', 'event-no-listener']) {
       expect(call).toHaveBeenCalledWith(
         '/api',
         '$events/result',
@@ -1591,6 +1590,61 @@ describe('Client Typert API', () => {
         expect.any(AbortSignal),
       )
     }
+    await client.dispose()
+  })
+
+  // The Host re-delivers a pending question to a Client that connects later — a
+  // page reload. That frame arrives before the page has built the session's
+  // Agent Context, so `resolve` finds nothing *yet*. Answering `next` there
+  // told the Host no Client will answer, and the question was lost (measured
+  // on the fleet 02/09/2026, fixed 07/09). The delivery now waits for the
+  // Context, bounded by its own lifetime.
+  it('waits for a missing Agent Context and answers once the page materializes it', async () => {
+    const call = vi.fn<ConnectionHandle['rpc']['call']>()
+      .mockResolvedValue({ ok: true, value: undefined })
+    const { ctx, client, carrier } = await eventBench(call)
+    const target = ctx.extend()
+    let materialized = false
+    const resolve = vi.fn((id: unknown) => materialized && id === 'agent-reloaded' ? target : undefined)
+    ctx.typert.contexts.registerClient('agent', {
+      identity: candidate => candidate === target ? agentId('agent-reloaded') : undefined,
+      resolve,
+    })
+    target.remote.$on('fixture/approval', async () => 'allowed')
+
+    carrier.emit(approvalFrame('event-after-reload', 'agent-reloaded', 'still there?'))
+    await new Promise(resolve => setTimeout(resolve, 600))
+    expect(call).not.toHaveBeenCalled()
+    expect(resolve.mock.calls.length).toBeGreaterThan(1)
+
+    materialized = true
+    await vi.waitFor(() => { expect(call).toHaveBeenCalledTimes(1) })
+    expect(call).toHaveBeenCalledWith(
+      '/api',
+      '$events/result',
+      {
+        args: {
+          clientId: 'event-client-1',
+          eventId: 'event-after-reload',
+          outcome: { kind: 'result', value: 'allowed' },
+        },
+      },
+      expect.any(AbortSignal),
+    )
+    await client.dispose()
+  })
+
+  it('answers nothing when the Host cancels a delivery still waiting for its Agent Context', async () => {
+    const { ctx, client, carrier, call } = await eventBench()
+    ctx.typert.contexts.registerClient('agent', {
+      identity: () => undefined,
+      resolve: () => undefined,
+    })
+    carrier.emit(approvalFrame('event-cancelled-waiting', 'agent-never', 'gone'))
+    await new Promise(resolve => setTimeout(resolve, 300))
+    carrier.emit({ type: 'cancel', eventId: 'event-cancelled-waiting' })
+    await new Promise(resolve => setTimeout(resolve, 600))
+    expect(call).not.toHaveBeenCalled()
     await client.dispose()
   })
 

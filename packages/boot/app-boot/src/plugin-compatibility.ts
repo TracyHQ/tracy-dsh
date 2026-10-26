@@ -95,9 +95,9 @@ export function evaluatePluginCompatibility(
  */
 export function pluginCompatibilityWarning(issue: PluginCompatibility): string {
   const key = `${issue.name}@${issue.version}`
-  return `Plugin ${key} is incompatible with dsh ${issue.runtimeVersion}: peerDependencies ${JSON.stringify(issue.peers)}. `
+  return `Plugin ${key} is incompatible with Tracy ${issue.runtimeVersion}: peerDependencies ${JSON.stringify(issue.peers)}. `
     + 'Running it may cause crashes or data loss. '
-    + 'Update the plugin or install a plugin version compatible with this dsh runtime. '
-    + `To accept this risk explicitly, grant the exact-version exemption for ${key} on dsh ${issue.runtimeVersion} with \`dsh plugin allow-version\` or the plugin manager, then retry the installation or restart dsh. `
+    + 'Update the plugin or install a plugin version compatible with this Tracy version. '
+    + `To accept this risk explicitly, grant the exact-version exemption for ${key} on Tracy ${issue.runtimeVersion} with \`dsh plugin allow-version\` or the plugin manager, then retry the installation or restart Tracy. `
     + `Exact-version exemption: ${issue.exempted ? 'active' : 'not active'}.`
 }

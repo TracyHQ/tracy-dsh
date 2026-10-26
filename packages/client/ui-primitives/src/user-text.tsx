@@ -13,10 +13,16 @@
  * the host skill gesture (`dsh-tool-skill`): it ends at whitespace or the
  * text end, so slash paths (`/nfs-hg/xxx`, `/plan.md`) and punctuation-glued
  * tokens (`/plan。`) stay plain even for a loaded name.
+ *
+ * Above all four sits a fifth, runtime-registered source: fenced-block folds
+ * (`user-text-folds.ts`). A block whose fence a plugin registered, and whose
+ * fold answers a chip, renders as that chip; nothing inside the block is
+ * decorated, and the fold may also hide a fixed line after it.
  */
 import type { ReactNode } from 'react'
 import clsx from 'clsx'
 import { ReferenceIconRegular } from './ReferenceIcon.tsx'
+import { userTextFoldRanges, type UserTextFold, type UserTextFoldChip } from './user-text-folds.ts'
 import css from './user-text.module.css'
 import markdownCss from './markdown/MarkdownText.module.css'
 
@@ -36,6 +42,16 @@ interface DecorationRange {
   readonly display?: string
 }
 
+/** A registered fenced-block fold resolved on this text (outranks every other source). */
+interface FoldDecorationRange {
+  readonly start: number
+  readonly end: number
+  readonly kind: 'fold'
+  readonly fence: string
+  readonly lineBreak: boolean
+  readonly chip: UserTextFoldChip
+}
+
 /** Optional navigation supplied by consumers that can preview references. */
 export interface UserTextReferences {
   /** Open a file path decoded from an `@` mention. */
@@ -53,6 +69,7 @@ export interface UserTextReferences {
  * (unsent queue rows pass none).
  * @param slashKind - the chip kind those tokens render as.
  * @param references - optional file and skill preview actions; session and command tokens stay labels.
+ * @param folds - registered fenced-block folds (see `user-text-folds.ts`); none by default.
  * @returns inline nodes covering the whole text.
  */
 export function projectUserText(
@@ -61,8 +78,10 @@ export function projectUserText(
   slashNames: readonly string[] = [],
   slashKind: 'skill' | 'command' = 'skill',
   references?: UserTextReferences,
+  folds: readonly UserTextFold[] = [],
 ): ReactNode {
-  const ranges: DecorationRange[] = []
+  const ranges: Array<DecorationRange | FoldDecorationRange> = []
+  for (const fold of userTextFoldRanges(text, folds)) ranges.push({ ...fold, kind: 'fold' })
   SESSION_WIRE_RE.lastIndex = 0
   let wire: RegExpExecArray | null
   while ((wire = SESSION_WIRE_RE.exec(text)) !== null) {
@@ -96,7 +115,9 @@ export function projectUserText(
     if (label.startsWith('/') && !slashNames.includes(label.slice(1))) continue
     ranges.push({ start: tokenStart, end: tokenStart + label.length, label, kind: 'plain' })
   }
-  const rankOf = (range: DecorationRange): number => range.kind === 'session' ? 0 : 1
+  // A fold never shares its start with a token (it starts on whitespace or a
+  // fence); were it to, the longer-range tie-break below still puts it first.
+  const rankOf = (range: DecorationRange | FoldDecorationRange): number => range.kind === 'session' ? 0 : 1
   ranges.sort((a, b) => a.start - b.start || rankOf(a) - rankOf(b) || b.end - a.end)
   const parts: ReactNode[] = []
   let cursor = 0
@@ -105,6 +126,25 @@ export function projectUserText(
   }
   for (const range of ranges) {
     if (range.start < cursor) continue
+    if (range.kind === 'fold') {
+      if (range.start > cursor) pushPlain(cursor, range.start)
+      if (range.lineBreak) parts.push(<span key={`b${range.start}`} className={css.plainRun}>{'\n'}</span>)
+      const { label, title, icon } = range.chip
+      parts.push(
+        <span
+          key={range.start}
+          className={css.refChip}
+          data-ref-chip="fold"
+          data-fold={range.fence}
+          title={title ?? label}
+        >
+          {icon !== undefined && <span className={css.foldIcon} aria-hidden>{icon}</span>}
+          {label}
+        </span>,
+      )
+      cursor = range.end
+      continue
+    }
     const { start: tokenStart, end, label, kind } = range
     if (tokenStart > cursor) pushPlain(cursor, tokenStart)
     const referenceKind = kind === 'session'

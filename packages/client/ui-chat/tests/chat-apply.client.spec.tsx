@@ -134,7 +134,7 @@ describe('Chat apply wiring', () => {
   })
 
   it.each([
-    { desktop: false, initial: 'detailed', choice: 'standard' },
+    { desktop: false, initial: 'compact', choice: 'standard' },
     { desktop: true, initial: 'standard', choice: 'detailed' },
   ] as const)('mirrors the Host transcript preference into its Settings row (desktop: $desktop)', async ({ desktop, initial, choice }) => {
     if (desktop) {
@@ -162,11 +162,11 @@ describe('Chat apply wiring', () => {
     const b = await bench()
     const row = b.runtime.slots.entries('settings.general.item').find(entry => entry.options.id === 'performance-usage')!
     const face = (row.inject as unknown as () => PerformanceUsageRowInjected)()
-    expect(face.hooks.performanceUsage.getSnapshot()).toBe('detailed')
-    face.setPerformanceUsage('compact')
-    expect(b.chatSettings.set).toHaveBeenCalledWith('performanceUsage', 'compact')
-    b.chatSettings.publish({ value: { linkOpening: 'sidebar', transcriptView: 'compact', performanceUsage: 'compact' } })
     expect(face.hooks.performanceUsage.getSnapshot()).toBe('compact')
+    face.setPerformanceUsage('detailed')
+    expect(b.chatSettings.set).toHaveBeenCalledWith('performanceUsage', 'detailed')
+    b.chatSettings.publish({ value: { linkOpening: 'sidebar', transcriptView: 'compact', performanceUsage: 'detailed' } })
+    expect(face.hooks.performanceUsage.getSnapshot()).toBe('detailed')
     for (const entry of [
       b.runtime.slots.entries('conversation.composer.dock').find(entry => entry.options.id === 'stats')!,
       b.runtime.slots.entries('conversation.chat.node').find(entry => entry.options.key === 'turn-tail')!,

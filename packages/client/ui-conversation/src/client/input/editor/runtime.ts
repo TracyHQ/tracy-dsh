@@ -3,8 +3,9 @@ import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { LexicalEditor, NodeKey } from 'lexical'
 import {
   $addUpdateTag, $createParagraphNode, $createTextNode, $getRoot, $getSelection, $isRangeSelection,
-  BLUR_COMMAND, CLEAR_HISTORY_COMMAND, COMMAND_PRIORITY_CRITICAL, createEditor, HISTORY_MERGE_TAG, PASTE_TAG,
-  RootNode, SELECTION_CHANGE_COMMAND, SKIP_DOM_SELECTION_TAG,
+  BEFORE_INPUT_COMMAND, BLUR_COMMAND, CLEAR_HISTORY_COMMAND, COMMAND_PRIORITY_CRITICAL,
+  CONTROLLED_TEXT_INSERTION_COMMAND, createEditor, HISTORY_MERGE_TAG, KEY_BACKSPACE_COMMAND, KEY_DOWN_COMMAND,
+  PASTE_TAG, RootNode, SELECTION_CHANGE_COMMAND, SKIP_DOM_SELECTION_TAG,
 } from 'lexical'
 import { registerPlainText } from '@lexical/plain-text'
 import { createEmptyHistoryState, registerHistory } from '@lexical/history'
@@ -41,6 +42,48 @@ const REFERENCE_PLACEHOLDER_RE = /[\uE100-\uE11D\uFFFC]/gu
 /** Undo merge window for contiguous typing, in ms (the old machine's mergeWindowMs). */
 const HISTORY_MERGE_DELAY_MS = 1000
 
+/**
+ * Keep the text an input method types right after its own Backspace.
+ *
+ * Lexical drops the first `insertText` that arrives before the next task after
+ * a handled Backspace, because macOS Chrome may accept a pending system text
+ * replacement there (lexical#8417; #9251 keeps it on macOS Chrome). Input
+ * methods that rewrite a word in place (Vietnamese Telex/VNI through EVKey,
+ * OpenKey, Unikey) send one Backspace per replaced character, then the new
+ * text without a keydown, so Telex "toi" + "o" left "t".
+ *
+ * A replacement acceptance targets the non-empty range of the shortcut it
+ * expands; input method text targets the caret. Only caret insertions are
+ * inserted here; range replacements keep Lexical's suppression.
+ * @param editor - the composer editor.
+ * @returns the unregister disposer.
+ */
+function registerTypeAfterBackspace(editor: LexicalEditor): () => void {
+  let afterBackspace = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return mergeRegister(
+    editor.registerCommand(KEY_BACKSPACE_COMMAND, () => {
+      // Same lifetime as Lexical's own flag: until the next task.
+      afterBackspace = true
+      clearTimeout(timer)
+      timer = setTimeout(() => { afterBackspace = false }, 0)
+      return false
+    }, COMMAND_PRIORITY_CRITICAL),
+    editor.registerCommand(KEY_DOWN_COMMAND, (event) => {
+      if (event.key !== 'Backspace') afterBackspace = false
+      return false
+    }, COMMAND_PRIORITY_CRITICAL),
+    editor.registerCommand(BEFORE_INPUT_COMMAND, (event) => {
+      if (!afterBackspace || event.inputType !== 'insertText' || !event.data) return false
+      const ranges = typeof event.getTargetRanges === 'function' ? event.getTargetRanges() : []
+      if (ranges.some(range => !range.collapsed)) return false
+      event.preventDefault()
+      return editor.dispatchCommand(CONTROLLED_TEXT_INSERTION_COMMAND, event.data)
+    }, COMMAND_PRIORITY_CRITICAL),
+    () => { clearTimeout(timer) },
+  )
+}
+
 /** One model-owned editor; registration and disposal remain with its model. */
 export class DraftEditorRuntime {
   /** The editor bound by the Composer's contenteditable host. */
@@ -76,6 +119,7 @@ export class DraftEditorRuntime {
     }
     const unregister = mergeRegister(
       registerPlainText(this.editor),
+      registerTypeAfterBackspace(this.editor),
       this.editor.registerCommand(BLUR_COMMAND, () => {
         // Finish this batch before an explicit focus can restore its updated selection.
         this.editor.update(preserveExternalSelection, { discrete: true })

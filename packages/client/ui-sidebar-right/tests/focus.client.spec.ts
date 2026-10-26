@@ -26,6 +26,8 @@ function harness() {
   const ctx = new Context()
   const tabs = new SidebarRightTabRegistry(ctx)
   for (const kind of ['guide', 'files', 'terminal']) tabs.register({ id: kind, kind, title: () => kind, multiple: kind === 'terminal' })
+  // Tracy: a page kind that keeps its last tab (`keepLast`).
+  tabs.register({ id: 'site', kind: 'site', title: () => 'site', keepLast: () => true })
   const room = { allowed: true, autoFullscreen: false }
   const { controller, adopt, show: showSession, measure } = createSidebarRightController(tabs, vi.fn(), {
     autoFullscreen: () => room.autoFullscreen,
@@ -617,5 +619,18 @@ describe('page close and refresh', () => {
     expect(h.controller.closeTarget(target)).toBe('stale')
     h.controller._undo()
     expect(h.controller.closeTarget(target)).toBe('stale')
+  })
+
+  it('Tracy: collapses the column instead of closing the last tab of a kind that keeps it', () => {
+    const h = harness()
+    h.controller.openTab('site')
+    const site = h.controller.active()!.id
+    const target = h.controller.focusedTarget(h.tabElement(site))!
+    expect(h.controller.closeTarget(target)).toBe('closed')
+    expect(h.layout().tabs[site]).toBeDefined()
+    expect(h.layout().expanded).toBe(false)
+    // The Tab domain's path refuses it too.
+    h.controller.closeIn(SESSION, site)
+    expect(h.layout().tabs[site]).toBeDefined()
   })
 })

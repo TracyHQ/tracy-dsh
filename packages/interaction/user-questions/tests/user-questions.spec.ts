@@ -4,6 +4,7 @@ import AgentRegistry, { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import UserQuestionService, {
   TIMED_WAIT_PARAMETER,
   UserQuestionError,
+  answerAction,
   type AskUserQuestionAnswer,
   type AskUserQuestionRequest,
 } from '@deepseek-ai/dsh-user-questions'
@@ -354,6 +355,112 @@ describe('UserQuestionService', () => {
       { id: 'plan-review', selected: ['Approve'] },
     ])
     expect(p.seen[0]?.questions[1]?.intent).toEqual(intent)
+  })
+
+  it('passes a recommended label through when it names an offered option', async () => {
+    const ctx = new Context()
+    await ctx.plugin(UserQuestionService)
+    const p = provider('npm')
+    registerAnswerer(ctx, p)
+    const questions = [{
+      id: 'pkg', question: 'Package manager?', recommended: 'npm',
+      options: [{ label: 'pnpm (Recommended)' }, { label: 'npm' }],
+    }]
+
+    await ctx.userQuestions.ask({ questions })
+
+    // Unchanged request: the answerer sees the caller's own objects, suffix kept.
+    expect(p.seen[0]?.questions).toBe(questions)
+    expect(p.seen[0]?.questions[0]).toMatchObject({
+      recommended: 'npm', options: [{ label: 'pnpm (Recommended)' }, { label: 'npm' }],
+    })
+  })
+
+  it('drops a recommended label that names none of the options and still asks', async () => {
+    const ctx = new Context()
+    await ctx.plugin(UserQuestionService)
+    const debug = vi.spyOn(ctx.logger, 'debug')
+    const p = provider('npm')
+    registerAnswerer(ctx, p)
+    const stray = { id: 'pkg', question: 'Package manager?', recommended: 'yarn', options: [{ label: 'npm' }] }
+    const kept = { id: 'free', question: 'Anything else?', recommended: 'x' }
+    const fine = { id: 'ok', question: 'Proceed?', recommended: 'yes', options: [{ label: 'yes' }] }
+
+    const result = await ctx.userQuestions.ask({ questions: [stray, kept, fine] })
+
+    expect(result.answers).toHaveLength(3)
+    expect(p.seen[0]?.questions).toEqual([
+      { id: 'pkg', question: 'Package manager?', options: [{ label: 'npm' }] },
+      { id: 'free', question: 'Anything else?' },
+      fine,
+    ])
+    expect(p.seen[0]?.questions[2]).toBe(fine)
+    expect(stray.recommended).toBe('yarn')
+    expect(debug).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads a recommended value that means exactly one option as that option\'s exact label', async () => {
+    const ctx = new Context()
+    await ctx.plugin(UserQuestionService)
+    const debug = vi.spyOn(ctx.logger, 'debug')
+    const p = provider('x')
+    registerAnswerer(ctx, p)
+    const bank = 'Nhận đơn rồi chuyển khoản ngân hàng (Đề xuất)'
+    const questions = [
+      // The label's opening words, the Vietnamese note left off (stand, 04/10).
+      { id: 'pay', question: 'Thu tiền?', recommended: 'Nhận đơn rồi chuyển khoản', options: [{ label: bank }, { label: 'Stripe' }] },
+      // A note the label does not carry, and another case.
+      { id: 'pkg', question: 'Package manager?', recommended: 'NPM (Recommended)', options: [{ label: 'pnpm' }, { label: 'npm' }] },
+      // The label carries the note, the value does not.
+      { id: 'host', question: 'Host?', recommended: 'Vercel', options: [{ label: 'Vercel (Đề xuất)' }, { label: 'Netlify' }] },
+      // Full-width brackets and doubled spaces.
+      { id: 'zh', question: '选择?', recommended: 'Option  A', options: [{ label: 'Option A（推荐）' }, { label: 'Option B' }] },
+    ]
+
+    await ctx.userQuestions.ask({ questions })
+
+    expect(p.seen[0]?.questions.map(q => q.recommended)).toEqual([bank, 'npm', 'Vercel (Đề xuất)', 'Option A（推荐）'])
+    // Labels are never rewritten, and the caller's objects are not mutated.
+    expect(p.seen[0]?.questions[0]?.options).toEqual([{ label: bank }, { label: 'Stripe' }])
+    expect(questions[1]?.recommended).toBe('NPM (Recommended)')
+    expect(debug).toHaveBeenCalledTimes(4)
+  })
+
+  it('drops a recommended value that two options could mean, or that only starts a word', async () => {
+    const ctx = new Context()
+    await ctx.plugin(UserQuestionService)
+    const p = provider('x')
+    registerAnswerer(ctx, p)
+    const two = { id: 'two', question: 'Pay?', recommended: 'Stripe', options: [{ label: 'Stripe Checkout' }, { label: 'Stripe Links' }] }
+    const equalTwice = { id: 'eq', question: 'Pay?', recommended: 'stripe', options: [{ label: 'Stripe (Recommended)' }, { label: 'STRIPE' }] }
+    const partWord = { id: 'part', question: 'Pay?', recommended: 'Pay', options: [{ label: 'PayPal' }, { label: 'Stripe' }] }
+
+    await ctx.userQuestions.ask({ questions: [two, equalTwice, partWord] })
+
+    expect(p.seen[0]?.questions.map(q => q.recommended)).toEqual([undefined, undefined, undefined])
+  })
+
+  it('reads an answer without action as a submit', async () => {
+    expect(answerAction({ answers: [] })).toBe('submit')
+    expect(answerAction({ answers: [], action: 'submit' })).toBe('submit')
+    expect(answerAction({ answers: [], action: 'decide' })).toBe('decide')
+    expect(answerAction({ answers: [], action: 'follow_up', note: 'why?' })).toBe('follow_up')
+  })
+
+  it('returns action and note from the answerer unchanged', async () => {
+    const ctx = new Context()
+    await ctx.plugin(UserQuestionService)
+    registerAnswerer(ctx, {
+      async ask() {
+        return { answers: [{ id: 'pkg', selected: [] }], action: 'follow_up', note: 'Explain the options first.' }
+      },
+    })
+
+    const result = await ctx.userQuestions.ask({ questions: [{ id: 'pkg', question: 'Package manager?' }] })
+
+    expect(result).toEqual({
+      answers: [{ id: 'pkg', selected: [] }], action: 'follow_up', note: 'Explain the options first.',
+    })
   })
 })
 

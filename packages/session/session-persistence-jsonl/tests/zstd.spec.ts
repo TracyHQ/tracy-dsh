@@ -567,7 +567,6 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
       const ctx = await mount(root, compression)
       const header = meta(`cancel-${compression}-header-read`, '/work')
       await writeLog(ctx.sessionPersistence, header, oneTurnLog())
-      await ctx.sessionPersistence.list()
       const path = logPath(root, header.cwd, header.id, compression)
       const probe = await open(path, 'r')
       const prototype = Object.getPrototypeOf(probe) as { read: HeaderRead }

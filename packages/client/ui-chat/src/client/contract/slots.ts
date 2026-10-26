@@ -1,4 +1,5 @@
 /** Chat-owned Slot declarations and composed component props. */
+import type { ChatLocalNode } from './chat-local.ts'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type {
@@ -11,7 +12,7 @@ import type {
   PropsStore, SlotHookFactory, SnapshotSelectorHook,
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
-import type { MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MarkdownFileMentions, UserTextFold } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { createChatStore } from '../stores.ts'
 import type { ChatPresentationPolicy } from '../presentation-policy.ts'
@@ -233,6 +234,10 @@ export interface ChatViewInjected {
   hooks: {
     /** Live presentation policy derived from the accepted work-details mode. */
     presentation: ObservableSnapshot<ChatPresentationPolicy>
+    /** Registered fenced-block folds (`uiConversation.userTextFolds`) for sent user text. */
+    textFolds: ObservableSnapshot<readonly UserTextFold[]>
+    /** Client-local rows (`ctx.chatLocal`), drawn among the log rows by `anchorSeq`. */
+    localRows: ObservableSnapshot<readonly ChatLocalNode[]>
   }
   keyedHooks: {
     /** Resolve the stable source for one Chat Node key. */

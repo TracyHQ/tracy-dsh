@@ -16,6 +16,7 @@ import { mathFromMarkdown } from 'mdast-util-math'
 import { gfm } from 'micromark-extension-gfm'
 import { math } from 'micromark-extension-math'
 import { cjkFriendlyStrong } from './cjkFriendlyStrong.ts'
+import { dollarAmounts } from './dollarAmounts.ts'
 import { mathCompatibility } from './mathCompatibility.ts'
 
 /**
@@ -33,13 +34,14 @@ export function parseGfm(text: string): Root {
 
 /**
  * Parse GFM markdown plus TeX math with the compatibility delimiters
- * (the settled arm's grammar).
+ * (the settled arm's grammar). `dollarAmounts()` comes after `math()` so it
+ * sees a single `$` first and keeps prices out of inline math.
  * @param text - Markdown source.
  * @returns The mdast root.
  */
 export function parseGfmWithMath(text: string): Root {
   return recoverLocalImages(fromMarkdown(text, {
-    extensions: [gfm(), cjkFriendlyStrong(), mathCompatibility(), math()],
+    extensions: [gfm(), cjkFriendlyStrong(), mathCompatibility(), math(), dollarAmounts()],
     mdastExtensions: [gfmFromMarkdown(), mathFromMarkdown()],
   }), text)
 }

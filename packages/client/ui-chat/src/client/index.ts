@@ -23,10 +23,13 @@ export type {
   TurnNavigationItem, UnknownSurfaceNode, UserMessageNode,
 } from './contract/snapshot.ts'
 export type {
-  AssistantChatData, ChatConversationViewNode, ChatNode, ChatNodeKind,
+  AssistantChatData, ChatConversationViewNode, ChatNode, ChatNodeKind, CommandChatData,
   FinalAssistantChatData, ManualCompactionChatData, RetryChatData, ToolChatData,
   TurnProcessChatData, TurnTailChatData,
 } from './contract/chat-nodes.ts'
+export type {
+  AnswerFeedback, ChatLocalContract, ChatLocalNode, ChatLocalNodeInput, ChatLocalSession, LocalAnswerActionsProps,
+} from './contract/chat-local.ts'
 export type { ChatStoreState, ToolCallId, TurnProcessViewEntry } from './contract/store.ts'
 export type { TranscriptViewRowInjected, TranscriptViewRowProps } from './settings/TranscriptViewRow.tsx'
 export type { TranscriptViewMode } from '../chat-settings.ts'

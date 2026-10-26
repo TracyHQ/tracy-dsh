@@ -56,6 +56,7 @@ const installFixture = installDesktopShortcuts as (
   getWindow: () => WindowFixture | undefined, userData: string,
   platform: Parameters<typeof installDesktopShortcuts>[2], updateMenu: () => void,
   overlayInput: (window: WindowFixture) => { readonly revision: number; readonly blocked: boolean },
+  trusted?: (url: string) => boolean,
 ) => KeyboardFixture
 type GuestsFixture = {
   acquire(owner: ContentsFixture, workspace: unknown): DesktopBrowserReservation
@@ -77,7 +78,7 @@ function browserGuest(reservation: DesktopBrowserReservation) {
   return { frame, guest }
 }
 
-async function fixture(platform: 'macos' | 'windows' | 'linux' = 'macos') {
+async function fixture(platform: 'macos' | 'windows' | 'linux' = 'macos', trusted?: (url: string) => boolean) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-keyboard-'))
   onTestFinished(async () => { await rm(root, { recursive: true, force: true }) })
   const frame: FrameFixture = { url: 'dsh-app://app/', name: '', parent: null }
@@ -89,7 +90,7 @@ async function fixture(platform: 'macos' | 'windows' | 'linux' = 'macos') {
   let current: WindowFixture | undefined = window
   const updateMenu = vi.fn()
   const updateOverlays = new DesktopUpdateOverlays()
-  const keyboard = installFixture(() => current, root, platform, updateMenu, window => updateOverlays.input(window as BrowserWindow))
+  const keyboard = installFixture(() => current, root, platform, updateMenu, window => updateOverlays.input(window as BrowserWindow), trusted)
   keyboard.attach(current)
   onTestFinished(() => { keyboard.dispose() })
   const handlers = new Map<string, (event: InvokeFixture, ...args: unknown[]) => unknown>(
@@ -267,6 +268,19 @@ it('rejects other windows, subframes, remote/shell pages, and malformed edits', 
   f.window.isDestroyed.mockReturnValue(true)
   await expect(get(f.event, f.definitions)).rejects.toThrow('rejected sender')
   f.detach(); await expect(get(f.event, f.definitions)).rejects.toThrow('rejected sender')
+})
+
+it('an embedder serving the product from its own origin trusts that origin instead of the application document', async () => {
+  const f = await fixture('macos', url => new URL(url).origin === 'https://product.example')
+  const get = f.handlers.get(DESKTOP_IPC.shortcutsGet)!
+  f.frame.url = 'https://product.example/workspace'
+  const ready = await f.call<ShortcutConfigSnapshot>(DESKTOP_IPC.shortcutsGet, f.definitions)
+  await f.call(DESKTOP_IPC.shortcutsEdit, { type: 'reset-all' }, ready.revision)
+  expect(f.contents.send).toHaveBeenCalledWith(DESKTOP_IPC.shortcutsChanged, expect.objectContaining({ status: 'ready' }))
+  for (const url of ['dsh-app://app/', 'https://other.example/']) {
+    f.frame.url = url
+    await expect(get(f.event, f.definitions)).rejects.toThrow('unowned renderer')
+  }
 })
 
 it('routes embedded input once, follows rebindings, and guards native window closure by revision and focus', async () => {
@@ -823,4 +837,124 @@ it('delivers Windows Edit actions to the focused browser guest without invoking 
   dispose()
   f.keyboard.sendEditingKey('C', ['control'])
   expect(f.contents.sendInputEvent).toHaveBeenCalledTimes(2)
+})
+
+// Tracy fork (TRACY-FORK.md): an embedder with several product windows passes them as `products`.
+async function productWindows() {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-keyboard-'))
+  onTestFinished(async () => { await rm(root, { recursive: true, force: true }) })
+  const make = (url: string) => {
+    const frame: FrameFixture = { url, name: '', parent: null }
+    const contents = Object.assign(new EventEmitter(), { mainFrame: frame, focusedFrame: frame,
+      isDestroyed: () => false, isFocused: () => true, send: vi.fn(),
+      setIgnoreMenuShortcuts: vi.fn(), focus: vi.fn(), sendInputEvent: vi.fn() })
+    const window = Object.assign(new EventEmitter(), { webContents: contents, isDestroyed: vi.fn(() => false),
+      isFocused: vi.fn(() => false), isEnabled: vi.fn(() => true), close: vi.fn() })
+    return { frame, contents, window, event: { sender: contents, senderFrame: frame } as InvokeFixture }
+  }
+  const a = make('https://product.example/a')
+  const b = make('https://product.example/b')
+  const all = [a, b]
+  let focused: typeof a | undefined = a
+  a.window.isFocused.mockImplementation(() => focused === a)
+  b.window.isFocused.mockImplementation(() => focused === b)
+  const updateMenu = vi.fn()
+  const install = installDesktopShortcuts as unknown as (
+    getWindow: () => WindowFixture | undefined, userData: string, platform: 'macos', updateMenu: () => void,
+    overlayInput: () => { readonly revision: number; readonly blocked: boolean }, trusted: (url: string) => boolean,
+    products: () => Iterable<WindowFixture>,
+  ) => KeyboardFixture
+  const keyboard = install(() => focused?.window, root, 'macos', updateMenu, () => ({ revision: 0, blocked: false }),
+    url => new URL(url).origin === 'https://product.example', () => all.map(w => w.window))
+  keyboard.attach(a.window)
+  keyboard.attach(b.window)
+  onTestFinished(() => { keyboard.dispose() })
+  const handlers = new Map<string, (event: InvokeFixture, ...args: unknown[]) => unknown>(
+    ipc.handle.mock.calls.map(([channel, handler]) => [channel, handler]))
+  const call = async <T>(from: typeof a, channel: string, ...args: unknown[]): Promise<T> =>
+    await handlers.get(channel)!(from.event, ...args) as T
+  const definitions: readonly ShortcutDefinition[] = [
+    { id: 'sidebar.left.toggle' as ShortcutCommandId, defaults: desktopDefaults({ code: 'KeyB', modifiers: ['primary'] }) },
+  ]
+  const press = (w: typeof a) => {
+    const preventDefault = vi.fn()
+    w.contents.emit('before-input-event', { preventDefault }, { type: 'keyDown', modifiers: [], code: 'KeyB', key: 'b',
+      meta: true, control: false, alt: false, shift: false, isAutoRepeat: false, isComposing: false })
+    return preventDefault
+  }
+  const inputs = (w: typeof a) => w.contents.send.mock.calls.filter(([channel]) => channel === DESKTOP_IPC.shortcutsInput)
+  const latest = (w: typeof a) => w.contents.send.mock.calls.filter(([channel]) => channel === DESKTOP_IPC.shortcutsChanged).at(-1)?.[1] as ShortcutConfigSnapshot | undefined
+  return { a, b, keyboard, call, definitions, press, inputs, latest, updateMenu, focus: (w: typeof a | undefined) => { focused = w } }
+}
+
+it('several product windows: each registers its own shortcuts, without focus, and a key reaches only the focused one', async () => {
+  const f = await productWindows()
+  await f.call(f.a, DESKTOP_IPC.shortcutsGet, f.definitions)
+  // The second window is not focused while it boots; it must still be answered.
+  await expect(f.call(f.b, DESKTOP_IPC.shortcutsGet, f.definitions)).resolves.toMatchObject({ status: 'ready' })
+  expect(f.press(f.a)).toHaveBeenCalledOnce()
+  expect(f.inputs(f.a).at(-1)?.[1]).toMatchObject({ kind: 'keyboard', code: 'KeyB', revision: f.latest(f.a)?.revision })
+  f.focus(f.b)
+  f.a.contents.send.mockClear()
+  expect(f.press(f.b)).toHaveBeenCalledOnce()
+  expect(f.inputs(f.b).at(-1)?.[1]).toMatchObject({ kind: 'keyboard', code: 'KeyB', revision: f.latest(f.b)?.revision })
+  expect(f.inputs(f.a)).toHaveLength(0)
+})
+
+it('several product windows: reloading or closing one leaves the other working', async () => {
+  const f = await productWindows()
+  await f.call(f.a, DESKTOP_IPC.shortcutsGet, f.definitions)
+  await f.call(f.b, DESKTOP_IPC.shortcutsGet, f.definitions)
+  f.b.contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
+  expect(f.press(f.a)).toHaveBeenCalledOnce()
+  // The key carries the revision the window was last told about, so its page accepts it.
+  expect(f.inputs(f.a).at(-1)?.[1]).toMatchObject({ revision: f.latest(f.a)?.revision })
+  f.b.window.emit('closed')
+  const told = f.latest(f.a)?.revision
+  f.a.contents.send.mockClear()
+  expect(f.press(f.a)).toHaveBeenCalledOnce()
+  expect(f.inputs(f.a).at(-1)?.[1]).toMatchObject({ revision: told })
+  // The reloaded window waits for its page again: no key until it registers.
+  f.focus(f.b)
+  expect(f.press(f.b)).not.toHaveBeenCalled()
+})
+
+it('several product windows: one shared keybindings file, every window told of a saved change', async () => {
+  const f = await productWindows()
+  await f.call(f.a, DESKTOP_IPC.shortcutsGet, f.definitions)
+  await f.call(f.b, DESKTOP_IPC.shortcutsGet, f.definitions)
+  const saved = await f.call<ShortcutSaveResult>(f.b, DESKTOP_IPC.shortcutsEdit,
+    { type: 'set', id: 'sidebar.left.toggle', binding: { code: 'KeyJ', modifiers: ['primary'] } }, f.latest(f.b)!.revision)
+  expect(saved.status).toBe('saved')
+  for (const w of [f.a, f.b]) expect(f.latest(w)).toMatchObject({ revision: saved.snapshot.revision, usingDefaults: false })
+  // The new binding works in the window that did not edit it.
+  expect(f.press(f.a)).not.toHaveBeenCalled()
+})
+
+it('several product windows: recording a shortcut in one window does not silence the other', async () => {
+  const f = await productWindows()
+  await f.call(f.a, DESKTOP_IPC.shortcutsGet, f.definitions)
+  await f.call(f.b, DESKTOP_IPC.shortcutsGet, f.definitions)
+  await f.call(f.b, DESKTOP_IPC.shortcutsRecording, true)
+  expect(f.press(f.a)).toHaveBeenCalledOnce()
+  expect(f.inputs(f.a)).toHaveLength(1)
+})
+
+it('several product windows: a sender that is no product window is still refused', async () => {
+  const f = await productWindows()
+  const stranger = { sender: {}, senderFrame: f.a.frame } as InvokeFixture
+  await expect(f.call({ ...f.a, event: stranger }, DESKTOP_IPC.shortcutsGet, f.definitions)).rejects.toThrow('rejected sender')
+  f.b.frame.url = 'https://other.example/'
+  await expect(f.call(f.b, DESKTOP_IPC.shortcutsGet, f.definitions)).rejects.toThrow('unowned renderer')
+})
+
+it('several product windows: a window destroyed outright (its contents already gone) is forgotten without touching it', async () => {
+  const f = await productWindows()
+  await f.call(f.a, DESKTOP_IPC.shortcutsGet, f.definitions)
+  await f.call(f.b, DESKTOP_IPC.shortcutsGet, f.definitions)
+  // Electron's BrowserWindow.destroy(): `closed` fires after the window's contents are gone.
+  Object.defineProperty(f.b.window, 'webContents', { get: () => { throw new TypeError('Object has been destroyed') } })
+  f.b.window.isDestroyed.mockReturnValue(true)
+  expect(() => f.b.window.emit('closed')).not.toThrow()
+  expect(f.press(f.a)).toHaveBeenCalledOnce()
 })

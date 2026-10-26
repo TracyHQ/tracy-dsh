@@ -96,6 +96,17 @@ describe('mandatory V4 lifecycle restoration', () => {
     expect(() => reopen([...begin(), assistant(), { ...repaired, data: { ...repaired.data, error: { name: 'OtherError', code: 'TOOL_NOT_STARTED' } } }])).toThrow()
   })
 
+  it('accepts the Tracy-branded not-started repair text as well as the upstream one', () => {
+    for (const text of [
+      'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.',
+      'The tool call was interrupted before Tracy recorded it as started. Retry it if it is still needed.',
+    ]) {
+      const repaired = result('call', { id: 'interrupted-tool-result-call-200', isError: true, content: [{ type: 'text', text }] })
+      repaired.data['error'] = { name: 'ToolNotStartedError', code: 'TOOL_NOT_STARTED' }
+      expect(() => reopen([...begin(), assistant(), repaired, ...end()])).not.toThrow()
+    }
+  })
+
   it('preserves ignorable payloads and unknown attribution metadata', () => {
     const message = { ...user('external'), source: JSON.parse('{"kind":"external","__proto__":{"x":1},"meta":{"a":2}}') as unknown }
     const opaque: Row = { type: 'external/event', data: { arbitrary: true }, ignorable: true }

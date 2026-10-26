@@ -12,7 +12,10 @@
  * and `sidebar.workspaces.session.row.action` lists rendered through this
  * entry's `renderSlot`; the actions in them, this package's own included,
  * are slot entries with their own behavior, so this component threads no
- * action callbacks and hosts no action surface.
+ * action callbacks and hosts no action surface. Tracy: a Workspace row's
+ * "..." menu is the `sidebar.workspaces.workspace.menu.item` list (its shipped
+ * Rename/Delete rows open this component's dialogs), and the grouped views'
+ * section label is the `sidebar.workspaces.section.label` seat.
  */
 import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
@@ -221,9 +224,12 @@ type SessionTreeProps = Pick<
 > & PropsRenderSlots<
   | 'sidebar.workspaces.session.menu.item'
   | 'sidebar.workspaces.session.row.action'
+  | 'sidebar.workspaces.workspace.menu.item'
   | 'sidebar.session.row.leading'
   | 'sidebar.session.row.hover'
 > & {
+  /** Tracy: whether the Workspace row menu list has any registration (none: no "..." trigger). */
+  workspaceMenu: boolean
   shortcuts: readonly import('@deepseek-ai/dsh-client-shortcuts/client').ShortcutCatalogEntry[]
   /** Always-mounted Session list snapshot. */
   list: SessionListState
@@ -287,7 +293,7 @@ function SessionTree({
   insertWorkspaceBefore,
   nestWorkspaces, groupExpansion, setGroupExpanded,
   setSessionOrder, home, t,
-  revealSessionId, onSessionRevealed, shortcuts,
+  revealSessionId, onSessionRevealed, shortcuts, workspaceMenu,
 }: SessionTreeProps) {
   const panelActive = usePanelInfo(info => info.activePanelId !== null)
   const statuses = useSessionStatus(s => s)
@@ -512,7 +518,10 @@ function SessionTree({
             }
           }}
           drag={workspaceDragProps}
-          actions={group.workspaceId === undefined
+          renderMenu={(owner, menuOpenState) => renderSlot(
+            'sidebar.workspaces.workspace.menu.item', owner, { hookContext: menuOpenState },
+          )}
+          actions={group.workspaceId === undefined || !workspaceMenu
             ? undefined
             : {
               rename: () => {
@@ -854,6 +863,7 @@ export function WorkspaceBrowser({
   searchSessions,
   searchResultLimit,
   useDirectoryFlow,
+  useWorkspaceMenu,
   useHostInfo,
   useShortcuts,
   useWorkspaceShortcuts,
@@ -890,6 +900,7 @@ export function WorkspaceBrowser({
   // Live occupancy of this surface's directory-flow hole (the same source the
   // flow reads): a composition without a picking affordance can add nothing.
   const directoryFlowAvailable = useDirectoryFlow(occupied => occupied)
+  const workspaceMenu = useWorkspaceMenu(occupied => occupied)
   const groupBy = useStore(s => s.groupBy)
   const orderBy = useStore(s => s.orderBy)
   // Persisted view blobs written before the archived filter existed rehydrate
@@ -1209,7 +1220,9 @@ export function WorkspaceBrowser({
       <div className={css.sectionHeader}>
         {wide && (
           <span className={clsx(css.sectionLabel, css.wide, searchExpanded && css.sectionLabelHidden)}>
-            {groupBy === 'flat' ? t('section.sessions') : t('section.workspaces')}
+            {groupBy === 'flat'
+              ? t('section.sessions')
+              : renderSlot('sidebar.workspaces.section.label', { label: t('section.workspaces') }, { fallback: t('section.workspaces') })}
           </span>
         )}
         {wide && (
@@ -1383,6 +1396,7 @@ export function WorkspaceBrowser({
                 usePanelInfo={usePanelInfo}
                 list={list}
                 shortcuts={shortcuts}
+                workspaceMenu={workspaceMenu}
                 useSessionStatus={useSessionStatus}
                 onSessionRenameRequest={requestSessionRename}
                 renderSlot={renderSlot}

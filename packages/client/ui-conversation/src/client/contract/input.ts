@@ -77,6 +77,8 @@ export interface ConsumeTokenRequest {
   readonly guard:
     | { readonly kind: 'span'; readonly span: TokenSpan }
     | { readonly kind: 'bare-token'; readonly token: string }
+    /** Clear the whole draft, only when it still equals `line` (trimmed). */
+    | { readonly kind: 'line'; readonly line: string }
 }
 
 /** Scoped request to insert ordinary completion text. */
@@ -266,6 +268,15 @@ export interface InputState {
   readonly occurrences: readonly Occurrence[]
   /** Messages still waiting for their own turn. */
   readonly queue: InboxState['next-turn']
+  /**
+   * Tracy: how many times this composer has sent something — a message (text or attachments only), a claimed
+   * command that submitted, or a command token it consumed (a `/` row picked from the menu, a bare `/name`, a
+   * text-taking command's argued line, a popup once its pick succeeded). Monotonic, never reset while the
+   * session's input lives; an empty Enter, a cancelled popup or a refused line does not count. It is the one
+   * signal of "the person sent something" that client commands leave, since they never start a turn and the
+   * session stays `blank`. The shell always publishes it; optional only so hand-built states stay valid.
+   */
+  readonly sent?: number
 }
 
 /**

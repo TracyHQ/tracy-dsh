@@ -41,10 +41,11 @@ import type { HalvesFit, LayoutState, PaneId } from '@deepseek-ai/dsh-client-ui-
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { GUIDE_KIND, pageAddress } from '../contract/seed.ts'
 import { dockLabels } from '../labels.ts'
-import type { SidebarRightOpenTabOptions } from '../service.ts'
+import { Launcher } from './Launcher.tsx'
+import type { SidebarRightLauncher, SidebarRightOpenTabOptions } from '../service.ts'
 import type { SidebarRightTabDefinition } from '../tab-registry.ts'
 import type { createSidebarRightStore, SurfaceState } from '../stores.ts'
-import { canCloseTab } from '../stores.ts'
+import { activeTabKindOf, canCloseTab, keepsLastOf } from '../stores.ts'
 import type { TabOccurrence } from '../tab-domain.ts'
 import type { SidebarRightTabNavigation } from '../contract/slots.ts'
 import type { TabHookContext } from '../tab-info.ts'
@@ -64,6 +65,13 @@ export interface SidebarRightPresentation {
   readonly track: boolean
   /** Whether the panel fills the viewport, independently of its retained track. */
   readonly fullscreen: boolean
+  /** The width in px the active tab's type prefers (SidebarRightTabDefinition.preferredWidth); absent for the frame default. */
+  readonly preferredWidth?: number | undefined
+  /**
+   * Tracy: the widest the normal panel may be, in px (SidebarRightTabDefinition.maxWidth of the active tab's type);
+   * absent when the type names none or the frame presents the panel fullscreen automatically.
+   */
+  readonly maxWidth?: number | undefined
 }
 
 /** What this package needs from its host beyond the framework shares. */
@@ -92,6 +100,7 @@ export interface SidebarRightInjected {
    * @param autoFullscreen - whether the frame is narrower than the automatic fullscreen width.
    */
   readonly reportAutoFullscreen: (autoFullscreen: boolean) => void
+  /** Bind this mounted Session's store and gesture helpers to the command face. */
   /**
    * The navigation face's `openTab`, for the strip's add control: a new tab is
    * the guide opened by kind, through the same path as every other open.
@@ -104,6 +113,7 @@ export interface SidebarRightInjected {
   /** Toggle the dock panel using its current display mode. */
   readonly toggleFullscreen: () => void
   readonly hooks: {
+    readonly launcher: HostObservable<SidebarRightLauncher | undefined>
     readonly shortcuts: HostObservable<readonly ShortcutCatalogEntry[]>
     readonly tabTypes: HostObservable<readonly SidebarRightTabDefinition[]>
   }
@@ -124,6 +134,7 @@ export type RightbarSeatProps =
 
 /** Everything the panel needs, already bound to one session. */
 interface PanelProps {
+  readonly launcher: SidebarRightLauncher | undefined
   readonly sessionId: SessionId
   readonly surface: SurfaceState
   readonly actions: Store['actions']
@@ -140,6 +151,8 @@ interface PanelProps {
   readonly occurrence: SidebarRightInjected['occurrence']
   readonly fullscreen: boolean
   readonly autoFullscreen: boolean
+  /** Tracy: the active tab's type caps the normal panel's width, so the fullscreen switch is not offered. */
+  readonly capped: boolean
   readonly active: boolean
   readonly retainTab: RightbarSeatProps['retainTab']
   /** Receives the kit's room-rule readings for the service's `split`. */
@@ -224,15 +237,17 @@ function TabSlot({
 function bodiesFor(panel: PanelProps): TabRenderer {
   const { t, ...rest } = panel
   // Slot dispatch selects a type; the record key separates bodies of that type.
-  return tab => (
-    <TabSlot
-      key={tab.id}
-      {...rest}
-      tab={tab}
-      seat="sidebar.right.pane.tab"
-      fallback={<p className={css.unavailable} data-sidebar-right-unavailable>{t('tab.unavailable')}</p>}
-    />
-  )
+  return tab => panel.launcher !== undefined && tab.kind === GUIDE_KIND
+    ? <div className={css.launcherEmpty}>{panel.launcher.emptyLabel}</div>
+    : (
+      <TabSlot
+        key={tab.id}
+        {...rest}
+        tab={tab}
+        seat="sidebar.right.pane.tab"
+        fallback={<p className={css.unavailable} data-sidebar-right-unavailable>{t('tab.unavailable')}</p>}
+      />
+    )
 }
 
 /** Dispatch a tab's title to its registered type; without one the chip shows the title captured at open time. */
@@ -260,14 +275,15 @@ function ExitFullscreenGlyph(): ReactNode {
 }
 
 /** The panel's two controls, placed by the kit at the top-right pane's strip end. */
-function PanelChrome({ sessionId, fullscreen, actions, t, shortcuts, toggleFullscreen }: Pick<PanelProps, 'sessionId' | 'actions' | 't' | 'fullscreen' | 'shortcuts' | 'toggleFullscreen'>): ReactNode {
+function PanelChrome({ sessionId, fullscreen, capped, actions, t, shortcuts, toggleFullscreen }: Pick<PanelProps, 'sessionId' | 'actions' | 't' | 'fullscreen' | 'capped' | 'shortcuts' | 'toggleFullscreen'>): ReactNode {
   const next: DockMode = fullscreen ? 'push' : 'fullscreen'
   const modeLabel = fullscreen ? t('chrome.exitFullscreen') : t('chrome.toFullscreen')
   const mode = shortcuts.find(entry => entry.id === 'pane.fullscreen.toggle')
   const toggle = shortcuts.find(entry => entry.id === 'sidebar.right.toggle')
   return (
     <>
-      <Tooltip label={modeLabel} shortcutKeys={mode?.keys} side="bottom" delayMs={500}>
+      {/* Tracy: a tab type with a width ceiling is never presented fullscreen, so its switch is absent. */}
+      {!capped && <Tooltip label={modeLabel} shortcutKeys={mode?.keys} side="bottom" delayMs={500}>
         <button
           type="button"
           className={css.iconButton}
@@ -278,7 +294,7 @@ function PanelChrome({ sessionId, fullscreen, actions, t, shortcuts, toggleFulls
         >
           {fullscreen ? <ExitFullscreenGlyph /> : <FullscreenGlyph />}
         </button>
-      </Tooltip>
+      </Tooltip>}
       <Tooltip label={t('chrome.collapse')} shortcutKeys={toggle?.keys} side="bottom" delayMs={500}>
         <button
           type="button"
@@ -300,6 +316,7 @@ function PanelChrome({ sessionId, fullscreen, actions, t, shortcuts, toggleFulls
  * anchored to the frame's right edge and slid off it while collapsed.
  */
 function SidebarPanel(panel: PanelProps & { width: number; panelRef: RefObject<HTMLDivElement> }): ReactNode {
+  const launcher = panel.launcher
   const { sessionId, surface, actions, t, renderSlot, openTab, width, reportRoom, fullscreen, panelRef } = panel
   const { expanded } = surface.layout
   const types = panel.useTabTypes(value => value)
@@ -323,8 +340,17 @@ function SidebarPanel(panel: PanelProps & { width: number; panelRef: RefObject<H
           canSplit={canSplit(surface.layout) && dockPaneIds(surface.layout).length < 2}
           dropZones="horizontal"
           minPaneFraction={0.2}
-          canAddTab={paneId => guideIn(surface.layout, paneId) === undefined}
-          canCloseTab={tabId => canCloseTab(surface, tabId)}
+          canAddTab={paneId => panel.launcher !== undefined || guideIn(surface.layout, paneId) === undefined}
+          isTabVisible={tab => panel.launcher === undefined || tab.kind !== GUIDE_KIND}
+          renderAddTab={launcher === undefined ? undefined : (paneId, active) => <Launcher
+            launcher={launcher}
+            entries={types.flatMap(type => (type.guide ?? []).map(entry => ({ ...entry, kind: type.kind, providerId: type.id })))}
+            paneId={paneId}
+            guideId={guideIn(surface.layout, paneId)}
+            active={active}
+            openTab={openTab}
+          />}
+          canCloseTab={tabId => canCloseTab(surface, tabId, keepsLastOf(kind => types.find(type => type.kind === kind)))}
           intents={intentsFor(sessionId, actions, openTab, panel.closeTab, panel.splitPane)}
           labels={dockLabels(t, panel.shortcuts.find(entry => entry.id === 'pane.split'), panel.shortcuts.find(entry => entry.id === 'page.close'))}
           renderTab={bodiesFor(panel)}
@@ -334,7 +360,7 @@ function SidebarPanel(panel: PanelProps & { width: number; panelRef: RefObject<H
           renderTabMenuItems={(tab, dismiss) =>
             renderSlot('sidebar.right.tab.menu.item', { tab, dismiss })}
           chrome={<PanelChrome
-            sessionId={sessionId} fullscreen={fullscreen} actions={actions} t={t}
+            sessionId={sessionId} fullscreen={fullscreen} capped={panel.capped} actions={actions} t={t}
             shortcuts={panel.shortcuts} toggleFullscreen={panel.toggleFullscreen}
           />}
           onRoom={reportRoom}
@@ -352,15 +378,26 @@ function SidebarPanel(panel: PanelProps & { width: number; panelRef: RefObject<H
  * measured and the automatic fullscreen rule of its frame width.
  */
 export function RightbarSeat({
-  sessionId, width, viewportWidth, canShow, useStore, actions, t, renderSlot, syncPresentation, measureRoom, reportAutoFullscreen,
-  openTab, closeTab, useTabTypes, useTabNavigation, occurrence, retainTab, active, useShortcuts, splitPane, toggleFullscreen,
+  sessionId, width, viewportWidth, canShow, useStore, actions, t, renderSlot, syncPresentation,
+  measureRoom, reportAutoFullscreen, openTab, closeTab, useTabTypes, useTabNavigation,
+  occurrence, retainTab, active, useShortcuts, useLauncher, splitPane, toggleFullscreen,
 }: RightbarSeatProps): ReactNode {
   // One store instance per session, so this map holds this session's surface.
+  // The binding published below serves the public face's commands on the
+  // mounted session; a tab's own actions route through the adopted stores.
+  const launcher = useLauncher(value => value)
   const shortcuts = useShortcuts(entries => entries)
   const surface = useStore(state => state.bySession[sessionId])
   const shown = active && surface !== undefined && surface.layout.expanded
   const autoFullscreen = viewportWidth < 768
-  const fullscreen = autoFullscreen || surface?.layout.mode === 'fullscreen'
+  const activeKind = surface === undefined ? undefined : activeTabKindOf(surface.layout)
+  const preferredWidth = useTabTypes(types => types.find(definition => definition.kind === activeKind)?.preferredWidth)
+  // Tracy: a tab type with a width ceiling draws a normal panel at most that wide. The recorded
+  // fullscreen mode is left as it is, so a tab without a ceiling presents it again.
+  const ceiling = useTabTypes(types => types.find(definition => definition.kind === activeKind)?.maxWidth)
+  const maxWidth = autoFullscreen ? undefined : ceiling
+  const capped = maxWidth !== undefined
+  const fullscreen = autoFullscreen || (!capped && surface?.layout.mode === 'fullscreen')
   const panelRef = useRef<HTMLDivElement | null>(null)
   // A reading never re-renders anything: the service applies it when it splits.
   const reportRoom = useCallback((fits: ReadonlyMap<PaneId, HalvesFit>): void => {
@@ -397,7 +434,7 @@ export function RightbarSeat({
           && animation.playState !== 'finished' && animation.playState !== 'idle')
         : []
       if (entering.length === 0) {
-        syncPresentation({ shown, track, fullscreen })
+        syncPresentation({ shown, track, fullscreen, preferredWidth, ...(maxWidth === undefined ? {} : { maxWidth }) })
         return
       }
       // Cancellation can replace the transition or remove it for reduced motion.
@@ -405,7 +442,7 @@ export function RightbarSeat({
     }
     reportWhenCovered()
     return () => { disposed = true }
-  }, [sessionId, shown, track, fullscreen, syncPresentation, active])
+  }, [sessionId, shown, track, fullscreen, preferredWidth, maxWidth, syncPresentation, active])
   // Leaving is part of that report: a seat that unmounts with its session must
   // hand the track back rather than leave one sized for a surface nobody draws.
   useLayoutEffect(() => active
@@ -419,7 +456,7 @@ export function RightbarSeat({
   if (surface === undefined) return null
   const panel: PanelProps = {
     sessionId, actions, t, renderSlot, surface, openTab, closeTab, useTabTypes, useTabNavigation, useStore, occurrence,
-    fullscreen, autoFullscreen, reportRoom, active, retainTab, shortcuts, splitPane, toggleFullscreen,
+    fullscreen, autoFullscreen, capped, reportRoom, active, retainTab, shortcuts, splitPane, toggleFullscreen, launcher,
   }
   return <SidebarPanel {...panel} width={width} panelRef={panelRef} />
 }
